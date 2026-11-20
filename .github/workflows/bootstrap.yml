@@ -23,6 +23,8 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
+          # GITHUB_TOKEN may push source but cannot create/update workflow files.
+          git reset --quiet HEAD -- .github/workflows/android.yml
           if ! git diff --cached --quiet; then
             git commit -m 'Import complete CH347 Studio Android project'
             git push origin "HEAD:${GITHUB_REF_NAME}"
