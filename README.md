@@ -1,5 +1,7 @@
 # CH347 Studio — Android USB Hardware Workbench
 
+**v0.1.1 UI fix:** Content respects Android status/navigation bars and display cutouts using root-view window insets. Padding is recalculated on each window inset update; it also adjusts for the soft keyboard on API 30+. Built for target SDK 35, tested through CI; hardware validation is still pending.
+
 A native, offline Android USB-host app for the **Waveshare USB TO UART/I2C/SPI/JTAG** adapter based on the **WCH CH347T**. Written in Java, using Android's built-in `android.hardware.usb` APIs. No root, backend service, analytics, network permission, or binary WCH DLL is needed.
 
 > **Release status: protocol-tested prototype, NOT yet tested with a physical CH347 on Android.** Source packet builders pass 24 standalone JVM assertions. Android APK compilation and device behavior must still be confirmed in Android Studio / CI and against real hardware. The app is intentionally honest about incomplete transports.

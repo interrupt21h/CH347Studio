@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.usb.UsbDevice;
@@ -17,6 +18,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.WindowInsets;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
@@ -207,6 +209,7 @@ public final class MainActivity extends Activity {
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(BG);
         root.setPadding(0, dp(12), 0, 0);
         setContentView(root);
+        applySystemBarInsets(root);
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.VERTICAL); heading.setPadding(dp(20), dp(8), dp(20), dp(14));
         TextView eyebrow = text("HARDWARE WORKBENCH  /  USB HOST", 10, MINT, true);
@@ -227,6 +230,40 @@ public final class MainActivity extends Activity {
         body.addView(panel); root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
         showCurrentPanel(); updateHeader();
     }
+    /**
+     * Keep the header and bottom scroll controls clear of system bars on
+     * Android 15+ (target SDK 35 enforces edge-to-edge).
+     *
+     * Each render creates a new root view, so the listener is installed for
+     * every root. Padding is recomputed from the 12dp design baseline rather
+     * than added to existing padding (which would accumulate on rotation,
+     * navigation changes, or IME show/hide).
+     */
+    @SuppressWarnings("deprecation")
+    private void applySystemBarInsets(View content) {
+        final int baseTopPadding = dp(12);
+        content.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            final int left, top, right, bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Insets bars = windowInsets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                Insets keyboard = windowInsets.getInsets(WindowInsets.Type.ime());
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = Math.max(bars.bottom, keyboard.bottom);
+            } else {
+                left = windowInsets.getSystemWindowInsetLeft();
+                top = windowInsets.getSystemWindowInsetTop();
+                right = windowInsets.getSystemWindowInsetRight();
+                bottom = windowInsets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(left, baseTopPadding + top, right, bottom);
+            return windowInsets;
+        });
+        content.requestApplyInsets();
+    }
+
     private void updateHeader() {
         if (status == null) return;
         if (selected == null) status.setText("●  NO ADAPTER   ·   Plug in CH347 via OTG");
