@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <usb-device vendor-id="6790" product-id="21978"/><!-- M0 55DA -->
+    <usb-device vendor-id="6790" product-id="21979"/><!-- M1 55DB -->
+    <usb-device vendor-id="6790" product-id="21980"/><!-- M2 55DC -->
+    <usb-device vendor-id="6790" product-id="21981"/><!-- M3 55DD -->
+    <usb-device vendor-id="6790" product-id="21982"/><!-- F  55DE -->
+</resources>
