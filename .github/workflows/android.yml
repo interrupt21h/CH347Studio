@@ -1,0 +1,48 @@
+name: Build CH347 Studio APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Run protocol regression tests
+        run: bash scripts/check-protocol.sh
+      - name: Build and lint Android debug APK
+        run: gradle --no-daemon --stacktrace :app:assembleDebug :app:lintDebug
+      - name: Give APK and artifact unique names
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/CH347Studio-v0.1.0-debug-run${GITHUB_RUN_NUMBER}-attempt${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:12}.apk"
+          sha256sum dist/*.apk > dist/SHA256SUMS
+      - name: Upload APK and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: CH347Studio-APK-${{ github.run_number }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
