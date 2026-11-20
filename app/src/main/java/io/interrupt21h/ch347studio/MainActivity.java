@@ -1,5 +1,6 @@
 package io.interrupt21h.ch347studio;
 
+import android.annotation.SuppressLint;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
@@ -92,6 +93,8 @@ public final class MainActivity extends Activity {
         return intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
     }
 
+    // API < 33 has no receiver-export flag overload; the legacy branch is guarded below.
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
         getWindow().setStatusBarColor(BG);
