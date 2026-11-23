@@ -1,104 +1,63 @@
-# CH347 Studio — Android USB Hardware Workbench
+# CH347 Studio v0.2.0 — Android USB/I²C/SPI Device Workbench
 
-**v0.1.1 UI fix:** Content respects Android status/navigation bars and display cutouts using root-view window insets. Padding is recalculated on each window inset update; it also adjusts for the soft keyboard on API 30+. Built for target SDK 35, tested through CI; hardware validation is still pending.
+A native Java Android application for WCH CH347T-compatible USB Host/OTG adapters (including the Waveshare USB to UART/I²C/SPI/JTAG box). Offline, no root, no account, no Internet permission. The current transport is CH347 vendor BULK (M1 recommended), with CDC UART supported where exposed. M2 HID, CH343 UART and JTAG operations remain unimplemented.
 
-A native, offline Android USB-host app for the **Waveshare USB TO UART/I2C/SPI/JTAG** adapter based on the **WCH CH347T**. Written in Java, using Android's built-in `android.hardware.usb` APIs. No root, backend service, analytics, network permission, or binary WCH DLL is needed.
+## v0.2.0 changes
 
-> **Release status: protocol-tested prototype, NOT yet tested with a physical CH347 on Android.** Source packet builders pass 24 standalone JVM assertions. Android APK compilation and device behavior must still be confirmed in Android Studio / CI and against real hardware. The app is intentionally honest about incomplete transports.
+- Visual **128-address I²C bus map**, showing reserved / unknown / NACK / ACK / error separately; tap an address to select it. Retains results while switching tabs. Full scan probes `0x08`–`0x77` and does *not* perform device writes beyond the CH347 bus address probe.
+- Device profiles for **SSD1306, SH1106, PCF8574/HD44780 LCD, Si4703, Si4713, RDA5807M**, plus BME280/BMP280, SHT31, DS3231, ADS1115, BH1750 and 24xx EEPROM devices.
+- A **30-script diagnostics library**, including SSD1306 / SH1106 patterns and clearing, PCF8574 character-LCD test, Si4703 16-register / RSSI / RDS snapshots, RDA5807M signal / RDS / optional ID, Si4713 CTS, POWER_UP (no frequency/power command), revision, TX status and audio status, and environmental sensor ID / sampling scripts.
+- SPI test scripts for **JEDEC ID, flash status, SFDP and isolated MOSI↔MISO loopback**.
+- **LAFVIN 2.13-inch e-paper HAT V4**: local preview for 122×250 1-bit frames; generate four 4,000-byte test frames and copy the packed bitmap to clipboard. Includes verified command-plan notes and an explicit hardware-control warning.
+- Larger touch controls, distinct per-category screens (USB / Bus / Displays / Radios / Sensors / SPI / UART / JTAG), retained horizontal tab position, USB trace, live scan status and proper Android 15+ system bar insets.
 
-## Supported modes / features
+### Important distinction: candidate vs. identification
 
-| Hardware mode | VID:PID | Function in this app |
-|---|---|---|
-| M0 dual UART | `1A86:55DA` | USB descriptor inspection; CDC-ACM UART if enumerated (vendor CH343 UART unimplemented) |
-| M1 UART / I²C / SPI | `1A86:55DB` | **Vendor BULK I²C + SPI** with transaction logging; CDC UART where available |
-| M2 HID UART / I²C / SPI | `1A86:55DC` | USB descriptor inspection only; HID reporting is a distinct transport and not implemented |
-| M3 UART / JTAG / I²C | `1A86:55DD` | **Vendor BULK I²C**; JTAG control not implemented |
-| CH347F multi-interface | `1A86:55DE` | Vendor BULK I²C/SPI **experimental**; individual interfaces must be validated |
+An I²C address ACK is not proof of identity. **Si4703 and RDA5807M can both use `0x10`; SSD1306 and SH1106 often share `0x3C` or `0x3D`**. The app shows candidates, labels actual chip-ID checks separately, and never tries invasive identification by default. **Si4713 defaults to `0x63`, with `0x11` alternate**. Its `GET_REV` and other command tests require a valid powered-up interface and may require RESET wiring. For ambiguous addresses, choose the known hardware before invoking a script.
 
-### Implemented I²C
+### Safety and limitations
 
-- 20/100/400/750 kHz selectable CH347 clock.
-- Address-only ACK probe and range scan (`0x08` through `0x77`).
-- 7-bit addressed write (up to 62 payload bytes); NACK reporting.
-- Read (1–63 bytes) and combined register-prefix write / repeated START / read / STOP.
-- Common address **hints**, *not identification*, and command / response hex logging.
+- **Disconnect USB power before moving the DIP mode or voltage selector.** Match the I/O voltage to your external module; avoid powering a 3.3 V bare sensor from 5 V signals.
+- OLED and PCF8574 LCD tests intentionally change device state. They require explicit confirmation; common LCD pin mapping is assumed and may not match your backpack.
+- Si4713 POWER_UP does not execute TX_TUNE_FREQ or TX_TUNE_POWER; **this app does not intentionally activate RF transmission**. TX status and audio status are interrogations, not RF proof.
+- Si4703 and RDA5807M FM status and RDS scripts are read-only. Some modules require explicit reset / SEN selection before they answer over I²C; not seeing an ACK does not prove the chip is absent.
+- SPI peripherals do not have enumerable addresses. Flash JEDEC ID is only meaningful for suitable flash chips, **not e-paper**. SPI probing is never automatic.
+- The LAFVIN e-paper requires **D/C, RESET and BUSY** control in addition to CLK, MOSI and CS. The CH347 M1 SPI channel alone cannot execute a reliable full-panel refresh without validated external GPIO wiring and transport support. Frame previews are local-only and are not transmitted to the panel. The V4-specific control sequence is a reference, not a hardware-tested renderer.
+- USB transports, tests and validation code are based on published device documentation and packet framing, **not physical-device-tested** in this release. Please report USB descriptors and trace if hardware differs.
 
-### Implemented SPI
+## Build and tests
 
-- Clock polarity/phase (modes 0–3), CS0 or CS1; hardware prescaler 0–7.
-- Read current 26-byte hardware configuration; preserve unrelated settings while adjusting mode and clock.
-- Explicit CS assertion/release and up to 507 full-duplex bytes; validate replies.
-- Shared command-level diagnostic log.
-
-### UART
-
-- A minimal CDC-ACM 8N1 terminal when the adapter actually exposes compatible CDC data/control interfaces.
-- Configurable baud rate, UTF-8 text+newline, arbitrary hex TX, live RX in hex and text.
-- This does *not* implement the proprietary WCH CH343 serial interface, so UART may not work on the supplied hardware despite its physical UART support.
-
-### JTAG
-
-- M3 interface inspection and hardware information only. Actual JTAG shifts, TAP-state machinery, target identification and programming are not implemented.
-
-## Build
-
-1. Open this directory as a project in Android Studio with **JDK 17**, **Android SDK 35** and internet for initial Gradle dependency retrieval.
-2. Use **Android Gradle Plugin 8.9.2** and **Gradle 8.11.1**.
-3. Run `:app:assembleDebug` or select **Build APK(s)** in Android Studio.
-4. The APK is at `app/build/outputs/apk/debug/app-debug.apk`.
-
-The ZIP does not contain a downloaded Gradle distribution or official `gradle-wrapper.jar`; `gradlew` is a deliberately explicit local-Gradle shim. An installed Gradle 8.11.1 works with `./gradlew`; Android Studio can also set a local Gradle installation. GitHub Actions uses `gradle/actions/setup-gradle@v4` to provision the known compatible version.
-
-To produce a downloadable APK on GitHub, push this directory into a repository and run **Build CH347 Studio** in Actions. The successful workflow uploads a uniquely named artifact containing `app-debug.apk`.
-
-Protocol-only tests (require just Java 17):
+Android JDK 17 + SDK 35, Gradle 8.11.1, Android Gradle Plugin 8.9.2:
 
 ```bash
 bash scripts/check-protocol.sh
+# In Android Studio or GitHub Actions:
+gradle :app:assembleDebug :app:lintDebug
 ```
 
-## Connection and safety
+The CI workflow runs protocol and device diagnostics unit tests, builds and lints the Android APK, checks its signature and publishes uniquely named APK artifacts with SHA-256 checksums. No Android SDK is needed for the pure-Java tests.
 
-1. **Unplug the USB-B cable** before changing the red two-position DIP switch. Select **M1** per the mode diagram on page 1 of the provided PDF. Reconnect with a USB-C OTG adapter (or powered hub) to your phone.
-2. Configure the adjacent physical 3.3 V / 5 V level selector to match the target. Voltage selection is **hardware-controlled**; the app cannot set it. Share GND with the target.
-3. Open CH347 Studio → Device → **Connect / Authorize USB**. Grant the Android USB permission prompt.
-4. Open I²C → Start at **100 kHz**. Scan addresses; confirm any ACKs before reading or writing.
-5. For SPI, start at <= 937.5 kHz if you have flying leads. SPI transfers are not harmless: MOSI commands can write/erase target memory. Never connect incompatible voltage levels.
-6. Open Device → **Copy USB descriptors** and **Copy event log** for debugging if transfer errors appear.
+## Repository layout
 
-The USB-B connector powers the board (5 V USB). The 3.3/5 V switch controls I/O level; it does **not** mean every attached target is safe at 5 V. The app intentionally does not attempt to change the red DIP configuration in software.
+- `app/src/main/java/io/interrupt21h/ch347studio/MainActivity.java`: screen navigation, bus scan, devices/scripts and user confirmation.
+- `.../ui/BusMatrixView.java`: tactile bus matrix; `.../ui/EpaperPreviewView.java`: offline frame preview.
+- `.../devices/DeviceCatalog.java`: address candidates, explanatory labels.
+- `.../devices/BusMap.java`: thread-safe scan state.
+- `.../devices/DeviceScripts.java`: script registry and functional test routines.
+- `.../devices/EpaperFrames.java`: packed 1-bit framebuffer generation.
+- `.../usb/Ch347Usb.java`: native M1/M3 USB BULK transactions.
+- `.../protocol/Ch347Packets.java`: CH347 packet framing.
+- `tests/ProtocolSelfTest.java` and `tests/DeviceScriptsSelfTest.java`: test suite executed by `scripts/check-protocol.sh`.
 
-## Current limitations / testing checklist
+## Technical references
 
-- [x] Protocol packet-builder test vectors (24 JVM assertions).
-- [x] USB VID/PID mode matching and interface/endpoint display.
-- [x] Android USB permission and attach/detach lifecycle logic in source.
-- [ ] Compile APK in Android Studio or run the included GitHub Actions workflow.
-- [ ] Verify M1 I²C scan and repeated-START transactions with real device (e.g. known EEPROM).
-- [ ] Verify M1 SPI JEDEC ID read using suitable flash chip, correct voltage and CS wiring.
-- [ ] Validate CH347F interface discovery.
-- [ ] Add a WCH CH343 UART backend / M2 HID UART and I²C/SPI reports.
-- [ ] Implement JTAG TAP operations for M3.
-- [ ] Bench-test unplug/replug, Android sleep, and USB power constraints.
+- Supplied Waveshare USB UART/I²C/SPI/JTAG adapter PDF (modes and DIP diagram).
+- [CH347 application development manual](https://files.waveshare.com/upload/2/2b/CH347-applicationa-development-manual-en.pdf).
+- [Si4703 register map and read ordering](https://github.com/sparkfun/FM_Tuner_Basic_Breakout-Si4703/blob/master/Libraries/Arduino/src/SparkFunSi4703.cpp).
+- [Adafruit Si4713 command descriptions](https://docs.circuitpython.org/projects/si4713/en/latest/_modules/adafruit_si4713.html).
+- [RDA5807M fixed-pointer register behavior](https://github.com/mathertel/Radio/blob/master/src/RDA5807M.cpp).
+- [SSD1306 command / framebuffer protocol](https://github.com/raspberrypi/pico-examples/blob/master/i2c/ssd1306_i2c/ssd1306_i2c.c).
+- [LAFVIN 2.13-inch HAT V4 driver](https://github.com/lafvintech/LAFVIN-2.13inch-ePaper-HAT/blob/main/Arduino/epd2in13_V4/epd2in13_V4.cpp).
+- [Android USB Host reference](https://developer.android.com/develop/connectivity/usb/host).
 
-## Files and design
-
-- `app/src/main/java/.../MainActivity.java`: native dark UI, tabs, USB authorization, event log.
-- `.../usb/Ch347Usb.java`: CH347 vendor BULK transport and I²C/SPI operations.
-- `.../usb/CdcUart.java`: opt-in CDC-ACM serial transport only.
-- `.../protocol/Ch347Packets.java`: pure-Java packet builders and reply checks.
-- `.../protocol/Hex.java`: strict hex parser and formatter.
-- `tests/ProtocolSelfTest.java`: dependency-free JVM protocol regression tests.
-- `.github/workflows/android.yml`: repeatable APK build + lint + protocol tests.
-
-## Sources used to derive protocol and platform behavior
-
-- Device PDF supplied by the user, pages 1–2 (DIP modes, level selector, connectors).
-- WCH CH347 application development manual: https://files.waveshare.com/upload/2/2b/CH347-applicationa-development-manual-en.pdf
-- CH347 vendor BULK stream opcodes and expected ACK semantics (independently documented by Linux driver): https://github.com/aystarik/ch347_vcp
-- CH347 SPI command/config framing analysis: https://github.com/nic3-14159/CH347-Research
-- Android USB host permissions and bulk transfers: https://developer.android.com/develop/connectivity/usb/host
-- Android Gradle plugin compatibility: https://developer.android.com/build/releases/agp-8-9-0-release-notes
-
-Original app code; licensed under the included MIT License. Protocol facts are not copied implementation code from the referenced GPL kernel driver.
+MIT-licensed original Android application. No bundled third-party code from GPL projects.

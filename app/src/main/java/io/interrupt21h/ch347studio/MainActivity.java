@@ -1,6 +1,7 @@
 package io.interrupt21h.ch347studio;
 
 import android.annotation.SuppressLint;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
@@ -32,6 +33,12 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.app.Activity;
 
+import io.interrupt21h.ch347studio.devices.BusMap;
+import io.interrupt21h.ch347studio.devices.DeviceCatalog;
+import io.interrupt21h.ch347studio.devices.DeviceScripts;
+import io.interrupt21h.ch347studio.devices.EpaperFrames;
+import io.interrupt21h.ch347studio.ui.BusMatrixView;
+import io.interrupt21h.ch347studio.ui.EpaperPreviewView;
 import io.interrupt21h.ch347studio.protocol.Hex;
 import io.interrupt21h.ch347studio.usb.CdcUart;
 import io.interrupt21h.ch347studio.usb.Ch347Usb;
@@ -46,13 +53,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Native Android USB-host workbench. No cloud services, telemetry, or permissions beyond USB. */
 public final class MainActivity extends Activity {
     private static final String USB_PERMISSION = "io.interrupt21h.ch347studio.USB_PERMISSION";
     private static final int BG = 0xFF0B1120, SURFACE = 0xFF152239, MINT = 0xFF4FE3B5;
     private static final int WHITE = 0xFFEAF1FA, MUTED = 0xFF9AAFC8, BLUE = 0xFF293D58;
-    private static final String[] TABS = {"DEVICE", "I²C", "SPI", "UART", "JTAG"};
+    private static final String[] TABS = {"USB", "I²C BUS", "DISPLAYS", "RADIOS", "SENSORS", "SPI", "UART", "JTAG"};
 
     private UsbManager usbManager;
     private UsbDevice selected;
@@ -65,6 +73,13 @@ public final class MainActivity extends Activity {
     private LinearLayout root, panel, tabStrip;
     private TextView status, eventView, taskView;
     private int currentTab;
+    private int selectedAddress = 0x3C;
+    private final BusMap busMap = new BusMap();
+    private BusMatrixView addressMatrix;
+    private EditText selectedAddressField;
+    private final AtomicBoolean busy = new AtomicBoolean(false);
+    private int spiMode = 0, spiClock = 6, spiCs = 0;
+
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -82,6 +97,7 @@ public final class MainActivity extends Activity {
                     log("CH347 removed; closing interfaces");
                     disconnect(); selected = null;
                 }
+                busMap.reset();
                 render();
             } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
                 log("USB device attached"); refreshDevices(); render();
@@ -95,7 +111,6 @@ public final class MainActivity extends Activity {
         return intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
     }
 
-    // API < 33 has no receiver-export flag overload; the legacy branch is guarded below.
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
@@ -161,6 +176,7 @@ public final class MainActivity extends Activity {
         if (d == null || !usbManager.hasPermission(d)) return;
         runWork("Connecting USB bridge", () -> {
             closeBridge();
+            busMap.reset();
             int pid = d.getProductId();
             if (pid == 0x55DA || pid == 0x55DC) {
                 log("Detected " + Ch347Usb.modeName(pid) + "; native vendor BULK I²C/SPI not available");
@@ -186,11 +202,13 @@ public final class MainActivity extends Activity {
     private interface Work { void run() throws Exception; }
     private void runWork(String title, Work task) {
         if (worker.isShutdown()) return;
+        if (!busy.compareAndSet(false, true)) { log("BUSY · Finish the current operation first"); return; }
         setTask(title + "…");
         worker.execute(() -> {
             try { task.run(); setTask("✓ " + title + " complete"); }
+            catch (InterruptedException ex) { Thread.currentThread().interrupt(); log("Cancelled · " + title); setTask("Cancelled"); }
             catch (Exception ex) { log("ERROR · " + title + " · " + ex.getMessage()); setTask("⚠ " + ex.getMessage()); }
-            runOnUiThread(this::updateHeader);
+            finally { busy.set(false); runOnUiThread(this::updateHeader); }
         });
     }
     private void setTask(String value) {
@@ -212,10 +230,13 @@ public final class MainActivity extends Activity {
         applySystemBarInsets(root);
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.VERTICAL); heading.setPadding(dp(20), dp(8), dp(20), dp(14));
-        TextView eyebrow = text("HARDWARE WORKBENCH  /  USB HOST", 10, MINT, true);
+        TextView eyebrow = text("CH347  /  HARDWARE LAB  ·  v0.2.0", 10, MINT, true);
         eyebrow.setLetterSpacing(0.16f); heading.addView(eyebrow);
-        TextView title = text("CH347 Studio", 29, WHITE, true); title.setPadding(0, dp(4), 0, dp(6)); heading.addView(title);
+        TextView title = text("CH347 Studio", 27, WHITE, true); title.setPadding(0, dp(4), 0, dp(6)); heading.addView(title);
         status = text("", 12, MUTED, false); heading.addView(status);
+        TextView overview = text("BUS SCAN   " + busMap.count(BusMap.ACK) + " responding     ·     " +
+                busMap.scanned() + "/112 checked", 11, MINT, true);
+        overview.setPadding(0, dp(8), 0, 0); heading.addView(overview);
         root.addView(heading);
         HorizontalScrollView tabScroller = new HorizontalScrollView(this);
         tabScroller.setHorizontalScrollBarEnabled(false);
@@ -223,6 +244,12 @@ public final class MainActivity extends Activity {
         tabStrip.setPadding(dp(12), 0, dp(12), dp(10));
         tabScroller.addView(tabStrip); root.addView(tabScroller);
         makeTabs();
+        tabScroller.post(() -> {
+            if (currentTab >= 0 && currentTab < tabStrip.getChildCount()) {
+                View chosen=tabStrip.getChildAt(currentTab);
+                tabScroller.smoothScrollTo(Math.max(0,chosen.getLeft()-dp(30)),0);
+            }
+        });
         ScrollView body = new ScrollView(this); body.setFillViewport(true);
         body.setVerticalScrollBarEnabled(false);
         panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
@@ -230,36 +257,22 @@ public final class MainActivity extends Activity {
         body.addView(panel); root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
         showCurrentPanel(); updateHeader();
     }
-    /**
-     * Keep the header and bottom scroll controls clear of system bars on
-     * Android 15+ (target SDK 35 enforces edge-to-edge).
-     *
-     * Each render creates a new root view, so the listener is installed for
-     * every root. Padding is recomputed from the 12dp design baseline rather
-     * than added to existing padding (which would accumulate on rotation,
-     * navigation changes, or IME show/hide).
-     */
+    /** API 35+ edge-to-edge: safe areas, display cutouts and keyboard (no cumulative padding). */
     @SuppressWarnings("deprecation")
     private void applySystemBarInsets(View content) {
-        final int baseTopPadding = dp(12);
-        content.setOnApplyWindowInsetsListener((view, windowInsets) -> {
-            final int left, top, right, bottom;
+        final int baseline = dp(12);
+        content.setOnApplyWindowInsetsListener((v, insets) -> {
+            int l, t, r, b;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                Insets bars = windowInsets.getInsets(
-                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                Insets keyboard = windowInsets.getInsets(WindowInsets.Type.ime());
-                left = bars.left;
-                top = bars.top;
-                right = bars.right;
-                bottom = Math.max(bars.bottom, keyboard.bottom);
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                l = bars.left; t = bars.top; r = bars.right; b = Math.max(bars.bottom, ime.bottom);
             } else {
-                left = windowInsets.getSystemWindowInsetLeft();
-                top = windowInsets.getSystemWindowInsetTop();
-                right = windowInsets.getSystemWindowInsetRight();
-                bottom = windowInsets.getSystemWindowInsetBottom();
+                l = insets.getSystemWindowInsetLeft(); t = insets.getSystemWindowInsetTop();
+                r = insets.getSystemWindowInsetRight(); b = insets.getSystemWindowInsetBottom();
             }
-            view.setPadding(left, baseTopPadding + top, right, bottom);
-            return windowInsets;
+            v.setPadding(l, baseline + t, r, b);
+            return insets;
         });
         content.requestApplyInsets();
     }
@@ -276,7 +289,7 @@ public final class MainActivity extends Activity {
             final int index = i;
             TextView item = text(TABS[i], 12, currentTab == i ? BG : MUTED, true);
             item.setGravity(Gravity.CENTER);
-            item.setPadding(dp(19), dp(11), dp(19), dp(11));
+            item.setPadding(dp(15), dp(11), dp(15), dp(11));
             item.setBackground(shape(currentTab == i ? MINT : SURFACE, 16));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             lp.setMargins(dp(4), 0, dp(4), 0); tabStrip.addView(item, lp);
@@ -289,9 +302,12 @@ public final class MainActivity extends Activity {
         switch (currentTab) {
             case 0: devicePanel(); break;
             case 1: i2cPanel(); break;
-            case 2: spiPanel(); break;
-            case 3: uartPanel(); break;
-            case 4: jtagPanel(); break;
+            case 2: profilePanel("Display"); break;
+            case 3: profilePanel("Radio"); break;
+            case 4: profilePanel("Sensor"); break;
+            case 5: spiPanel(); break;
+            case 6: uartPanel(); break;
+            case 7: jtagPanel(); break;
         }
         addLogs();
     }
@@ -326,7 +342,31 @@ public final class MainActivity extends Activity {
     }
 
     private void i2cPanel() {
-        blockTitle("I²C Explorer", "Scan 7-bit addresses, exchange hex bytes, and perform repeated-START register reads.");
+        blockTitle("I²C bus analyzer", "Tap an address to inspect candidates. Green cells ACK; red cells had transfer errors. Address ≠ chip ID.");
+        LinearLayout matrixCard = card();
+        matrixCard.addView(text("7-bit address matrix  /  0x00–0x7F", 16, WHITE, true));
+        detail(matrixCard, "" + busMap.count(BusMap.ACK) + " responding  ·  " + busMap.count(BusMap.ERROR) +
+                " errors  ·  " + busMap.scanned() + "/112 scanned   ·   reserved addresses dimmed");
+        addressMatrix = new BusMatrixView(this, busMap);
+        addressMatrix.setSelectedAddress(selectedAddress);
+        matrixCard.addView(addressMatrix, new LinearLayout.LayoutParams(-1, -2));
+        TextView selection = text(String.format(Locale.US,"0x%02X • %s",selectedAddress,
+                 DeviceCatalog.hint(selectedAddress)), 12, MINT, true);
+        selection.setPadding(0, dp(12), 0, dp(6));matrixCard.addView(selection);
+        addressMatrix.setOnAddressSelected(address -> {
+            selectedAddress = address;
+            if (selectedAddressField != null)
+                selectedAddressField.setText(String.format(Locale.US,"%02X",address));
+            selection.setText(String.format(Locale.US,"0x%02X • %s   [%s]",address,
+                DeviceCatalog.hint(address),busMap.get(address)==BusMap.ACK?"ACK": "unverified"));
+        });
+        action(matrixCard, "Explore profiles for selected address", false, () -> {
+            List<DeviceCatalog.Profile> candidates=DeviceCatalog.candidates(selectedAddress);
+            if(candidates.isEmpty()) { log("No profile for 0x" + Integer.toHexString(selectedAddress)); return; }
+            String category=candidates.get(0).category;
+            currentTab=category.equals("Display")?2:category.equals("Radio")?3:4;
+            render();
+        });
         LinearLayout settings = card();
         settings.addView(text("Bus configuration", 16, WHITE, true));
         Spinner speed = spinner(settings, new String[] {"20 kHz", "100 kHz", "400 kHz", "750 kHz"}, 1);
@@ -343,22 +383,33 @@ public final class MainActivity extends Activity {
             runWork("I²C scan", () -> {
                 Ch347Usb b = requireBridge(); b.i2cSpeed(selectedSpeed);
                 List<String> found = new ArrayList<>();
+                busMap.reset();
                 for (int a = 0x08; a <= 0x77; a++) {
-                    if (Thread.interrupted()) throw new InterruptedException("Scan interrupted");
-                    if (b.i2cProbe(a)) {
-                        found.add(String.format(Locale.US, "0x%02X%s", a, commonI2cHint(a)));
-                        final String content = String.join("\n", found);
-                        runOnUiThread(() -> addresses.setText(content));
+                    if (Thread.currentThread().isInterrupted() || b != bridge)
+                        throw new InterruptedException("Scan interrupted / adapter detached");
+                    try {
+                        if (b.i2cProbe(a)) {
+                            busMap.record(a, BusMap.ACK);
+                            found.add(String.format(Locale.US,"0x%02X  •  %s",a,DeviceCatalog.hint(a)));
+                        } else busMap.record(a, BusMap.EMPTY);
+                    } catch (IOException probeError) {
+                        busMap.record(a, BusMap.ERROR);
+                        log(String.format(Locale.US,"I²C 0x%02X transfer error: %s",a,probeError.getMessage()));
                     }
-                    if ((a & 15) == 0) setTask(String.format(Locale.US,"Scanning I²C… 0x%02X / 0x77", a));
+                    if ((a & 7) == 0) {
+                        setTask(String.format(Locale.US,"Scanning I²C… 0x%02X / 0x77",a));
+                        runOnUiThread(() -> { if (addressMatrix != null) addressMatrix.invalidate(); });
+                    }
                 }
-                if (found.isEmpty()) runOnUiThread(() -> addresses.setText("No ACKs detected. Verify power, SDA/SCL and pull-ups."));
-                log("I²C scan found " + found.size() + " address(es): " + found);
+                final String summary=found.isEmpty()?"No ACKs detected. Check SDA/SCL, pull-ups, voltage and adapter mode.":String.join("\n", found);
+                log("Scan complete: " + found.size() + " ACKs, " + busMap.count(BusMap.ERROR) + " errors");
+                runOnUiThread(() -> { addresses.setText(summary); render(); });
             });
         });
         LinearLayout transfer = card();
         transfer.addView(text("Addressed transactions", 16, WHITE, true));
-        EditText addr = field(transfer, "7-bit address (hex)", "10");
+        EditText addr = field(transfer, "7-bit address (hex)", String.format(Locale.US,"%02X",selectedAddress));
+        selectedAddressField=addr;
         EditText out = field(transfer, "Write bytes (hex, optional)", "00");
         EditText read = field(transfer, "Read length (1–63)", "8");
         TextView result = text("Response will appear here", 12, MINT, false);
@@ -392,20 +443,103 @@ public final class MainActivity extends Activity {
         detail(transfer, "A scan or register read may alter the state of some slave devices. Do not connect 5 V signals to a 3.3 V target.");
     }
 
+
+    private void profilePanel(String category) {
+        String title = category.equals("Display") ? "I²C display laboratory" :
+                category.equals("Radio") ? "FM radio diagnostics" : "Sensor & peripheral diagnostics";
+        blockTitle(title,"Select the exact module and address before a script. ACK addresses are candidate matches, not guaranteed identities.");
+        if (busMap.scanned() == 0) {
+            LinearLayout intro=card();
+            intro.addView(text("Start with a bus scan",16,WHITE,true));
+            detail(intro,"Open I²C BUS and run the full scan; modules can also be tested with manually selected addresses before scanning.");
+            action(intro,"Open bus analyzer",true,()->{currentTab=1;render();});
+        }
+        if(category.equals("Radio")) {
+            LinearLayout c=card();
+            c.addView(text("Receiver identification caveat",15,WHITE,true));
+            detail(c,"Si4703 and RDA5807M may both acknowledge 0x10. RDA5807M 0x11 chip-ID probing and Si4713 command writes require deliberate selection. No automatic tuning or RF transmission occurs.");
+        }
+        int num=0;
+        for (DeviceCatalog.Profile profile : DeviceCatalog.I2C) {
+            if (category.equals("Sensor") ? profile.category.equals("Radio") || profile.category.equals("Display") : !category.equals(profile.category)) continue;
+            num++;
+            LinearLayout c=card();
+            c.addView(text(profile.name,16,WHITE,true));
+            detail(c,profile.notes);
+            String[] addrLabels=new String[profile.addresses.length];
+            int prefer=0;
+            for(int k=0;k<profile.addresses.length;k++){
+                int address=profile.addresses[k];
+                boolean found=busMap.get(address)==BusMap.ACK;
+                addrLabels[k]=String.format(Locale.US,"0x%02X  %s",address,found?"● ACK":"○ unverified");
+                if(found)prefer=k;
+                if(address==selectedAddress)prefer=k;
+            }
+            Spinner addr=spinner(c,addrLabels,prefer);
+            for (DeviceScripts.Script test : DeviceScripts.forProfile(profile.key)) {
+                action(c,"▶  " + test.title + (test.risk==DeviceScripts.Risk.READ_ONLY?"":"  ⚠"),
+                       test.risk==DeviceScripts.Risk.READ_ONLY,()-> {
+                    int index=addr.getSelectedItemPosition();
+                    if(index<0)return;
+                    selectedAddress=profile.addresses[index];
+                    executeI2cScript(test,selectedAddress);
+                });
+                detail(c,test.detail);
+            }
+        }
+        if(num==0)detail(card(),"No profiles for this category");
+    }
+
+    private DeviceScripts.I2c transport() {
+        return new DeviceScripts.I2c() {
+            @Override public boolean probe(int a) throws IOException { return requireBridge().i2cProbe(a); }
+            @Override public byte[] read(int a,byte[] prefix,int count) throws IOException { return requireBridge().i2cRead(a,prefix,count); }
+            @Override public void write(int a,byte[] bytes) throws IOException { requireBridge().i2cWrite(a,bytes); }
+        };
+    }
+
+    private void executeI2cScript(DeviceScripts.Script test,int address) {
+        Runnable go=()-> runWork(test.title,()-> {
+            String outcome=DeviceScripts.runI2c(test.id,address,transport(),this::log);
+            log(String.format(Locale.US,"%s @ 0x%02X\n%s",test.title,address,outcome));
+            runOnUiThread(()-> new AlertDialog.Builder(this).setTitle(test.title)
+                    .setMessage(outcome).setPositiveButton("Close",null).show());
+        });
+        if(test.risk==DeviceScripts.Risk.READ_ONLY)go.run();
+        else new AlertDialog.Builder(this).setTitle("Confirm: " + test.title)
+                .setMessage(test.detail + "\n\nThis operation may change hardware state. Confirm the exact chip, address, I/O voltage and wiring. Si4713 scripts do not initiate RF transmission.")
+                .setNegativeButton("Cancel",null).setPositiveButton("Run test",(dialog,which)->go.run()).show();
+    }
+
+    private void executeSpiScript(DeviceScripts.Script test) {
+        Runnable go=()->runWork(test.title,()-> {
+            String output=DeviceScripts.runSpi(test.id,
+                  data -> requireBridge().spiTransfer(spiMode,spiClock,spiCs,data));
+            log(test.title + " • " + output);
+            runOnUiThread(()-> new AlertDialog.Builder(this).setTitle(test.title)
+                    .setMessage(output).setPositiveButton("Close",null).show());
+        });
+        if(test.risk==DeviceScripts.Risk.READ_ONLY)go.run();
+        else new AlertDialog.Builder(this).setTitle("Verify SPI setup")
+                .setMessage(test.detail + "\n\nDisconnect all target devices for the loopback test, and physically connect MOSI to MISO.")
+                .setNegativeButton("Cancel",null).setPositiveButton("Run test",(dialog,which)->go.run()).show();
+    }
+
     private void spiPanel() {
         blockTitle("SPI Console", "Full-duplex SPI transactions with configurable clock phase, polarity and chip select.");
         LinearLayout c = card();
         c.addView(text("Master / transaction settings", 16, WHITE, true));
-        Spinner mode = spinner(c, new String[] {"Mode 0 · CPOL 0 / CPHA 0", "Mode 1 · CPOL 0 / CPHA 1", "Mode 2 · CPOL 1 / CPHA 0", "Mode 3 · CPOL 1 / CPHA 1"}, 0);
-        Spinner clock = spinner(c, new String[] {"60 MHz", "30 MHz", "15 MHz", "7.5 MHz", "3.75 MHz", "1.875 MHz", "937.5 kHz", "468.75 kHz"}, 6);
-        Spinner cs = spinner(c, new String[] {"CS0", "CS1"}, 0);
+        Spinner mode = spinner(c, new String[] {"Mode 0 · CPOL 0 / CPHA 0", "Mode 1 · CPOL 0 / CPHA 1", "Mode 2 · CPOL 1 / CPHA 0", "Mode 3 · CPOL 1 / CPHA 1"}, spiMode);
+        Spinner clock = spinner(c, new String[] {"60 MHz", "30 MHz", "15 MHz", "7.5 MHz", "3.75 MHz", "1.875 MHz", "937.5 kHz", "468.75 kHz"}, spiClock);
+        Spinner cs = spinner(c, new String[] {"CS0", "CS1"}, spiCs);
         EditText bytes = field(c, "MOSI bytes (hex, 1–507)", "9F 00 00 00");
         TextView response = text("MISO response will appear here", 12, MINT, false);
         response.setTypeface(Typeface.MONOSPACE);
         action(c, "Transfer SPI bytes", true, () -> runWork("SPI transfer", () -> {
             Ch347Usb b = requireBridge();
+            spiMode = mode.getSelectedItemPosition();spiClock = clock.getSelectedItemPosition();spiCs = cs.getSelectedItemPosition();
             byte[] tx = Hex.parse(bytes.getText().toString());
-            byte[] rx = b.spiTransfer(mode.getSelectedItemPosition(), clock.getSelectedItemPosition(), cs.getSelectedItemPosition(), tx);
+            byte[] rx = b.spiTransfer(spiMode, spiClock, spiCs, tx);
             log("SPI TX " + Hex.format(tx) + "  RX " + Hex.format(rx));
             runOnUiThread(() -> response.setText("MISO  " + Hex.format(rx)));
         }));
@@ -414,6 +548,36 @@ public final class MainActivity extends Activity {
         LinearLayout tip = card();
         tip.addView(text("Hardware safety", 16, WHITE, true));
         detail(tip, "Begin at 937.5 kHz with short wires. Ensure GND is shared. Do not connect an unpowered target or exceed its voltage rating. Bytes such as 9F can issue commands to attached flash chips.");
+        LinearLayout suites = card();
+        suites.addView(text("SPI device test scripts", 17, WHITE, true));
+        detail(suites, "Tests run only when selected. JEDEC/SFDP identify compatible flash chips, not the e-paper display.");
+        for (DeviceScripts.Script test : DeviceScripts.ALL) {
+            if (!test.profile.startsWith("spi-")) continue;
+            action(suites, "▶  " + test.title, false, () -> {
+                spiMode = mode.getSelectedItemPosition();spiClock = clock.getSelectedItemPosition();spiCs = cs.getSelectedItemPosition();
+                executeSpiScript(test);
+            });
+            detail(suites,test.detail + "  •  " + test.risk.name().replace('_',' '));
+        }
+        LinearLayout epaper = card();
+        epaper.addView(text("LAFVIN 2.13-inch e-paper HAT  ·  V4", 18, WHITE, true));
+        detail(epaper, "122 × 250 mono pixels. SPI alone is insufficient: D/C, RESET and BUSY must also be controlled and observed. The CH347 cannot identify this write-only display through a JEDEC ID request.");
+        detail(epaper, "WIRING   3.3V / GND / MOSI(DIN) / SCLK / CS + separate D/C / RST / BUSY. Verify voltage on your exact breakout. Full refresh is disabled until GPIO control is implemented and validated.");
+        Spinner patterns = spinner(epaper, new String[]{"Blank white", "Checkerboard", "Vertical bars", "Alignment / crosshair"}, 1);
+        EpaperPreviewView preview = new EpaperPreviewView(this);
+        epaper.addView(preview, new LinearLayout.LayoutParams(-1,-2));
+        action(epaper, "Preview pattern locally", false, () -> preview.setPattern(patterns.getSelectedItemPosition()));
+        action(epaper, "Copy 4,000-byte framebuffer (hex)", false, () -> {
+            byte[] frame=EpaperFrames.make(patterns.getSelectedItemPosition());
+            ClipboardManager cb=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+            cb.setPrimaryClip(ClipData.newPlainText("LAFVIN 122x250 1bpp frame",Hex.format(frame)));
+            log("Copied simulated e-paper frame: " + frame.length + " bytes");
+        });
+        action(epaper, "Copy e-paper command plan", false, () -> {
+            String plan="LAFVIN 2.13 V4 122x250: RESET pulse, wait BUSY idle; initialize controller per revision; D/C LOW command 0x24; D/C HIGH send 4000 frame bytes; D/C LOW 0x22 then D/C HIGH 0xF7; command 0x20 and wait BUSY. Do not run without verified GPIO timing/pin map.";
+            ClipboardManager cb=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+            cb.setPrimaryClip(ClipData.newPlainText("e-paper SPI + GPIO control plan",plan));
+        });
     }
 
     private void uartPanel() {
