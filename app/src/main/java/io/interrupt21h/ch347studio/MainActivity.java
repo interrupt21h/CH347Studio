@@ -636,14 +636,16 @@ public final class MainActivity extends Activity {
             {"spi-tools","Isolated SPI diagnostic", "Loopback MOSI→MISO with ALL external devices disconnected."}
         };
         for(String[] group:groups){
-            LinearLayout c=card();c.addView(text(group[1],16,WHITE,true));detail(c,group[2]);
+            LinearLayout deviceCard=card();
+            deviceCard.addView(text(group[1],16,WHITE,true));
+            detail(deviceCard,group[2]);
             for(DeviceScripts.Script test:DeviceScripts.forProfile(group[0])){
-                action(c,"▶  "+test.title,test.risk==DeviceScripts.Risk.READ_ONLY,()->{
+                action(deviceCard,"▶  "+test.title,test.risk==DeviceScripts.Risk.READ_ONLY,()->{
                     spiMode=mode.getSelectedItemPosition();spiClock=clock.getSelectedItemPosition();spiCs=cs.getSelectedItemPosition();
                     spiHardwareAddress=hwAddr.getSelectedItemPosition();
                     executeSpiScript(test);
                 });
-                detail(c,test.detail);
+                detail(deviceCard,test.detail);
             }
         }
         LinearLayout gc=card();
