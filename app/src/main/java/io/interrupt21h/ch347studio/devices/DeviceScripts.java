@@ -33,7 +33,6 @@ public final class DeviceScripts {
     }
     public static final List<Script> ALL = Collections.unmodifiableList(Arrays.asList(
         s("ack","generic","Address ACK", "Checks whether the target still acknowledges (no ID claim)",Risk.READ_ONLY),
-        s("register","generic","Read register", "Combined prefix + repeated START; custom read parameters",Risk.READ_ONLY),
         s("ssd1306-checker","ssd1306","Checkerboard test", "Initialize 128×64 SSD1306 then draw checkerboard",Risk.DISPLAY_CHANGE),
         s("ssd1306-bars","ssd1306","Vertical bars", "Initialize SSD1306 then draw contrasting columns",Risk.DISPLAY_CHANGE),
         s("ssd1306-clear","ssd1306","Clear display", "Clear SSD1306 128×64 screen RAM",Risk.DISPLAY_CHANGE),
