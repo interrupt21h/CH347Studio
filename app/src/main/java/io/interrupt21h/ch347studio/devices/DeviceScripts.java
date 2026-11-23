@@ -33,6 +33,12 @@ public final class DeviceScripts {
     }
     public static final List<Script> ALL = Collections.unmodifiableList(Arrays.asList(
         s("ack","generic","Address ACK", "Checks whether the target still acknowledges (no ID claim)",Risk.READ_ONLY),
+        s("tca-mask","tca9548a","Read channel mask", "Read 8-channel select mask; does not alter routing",Risk.READ_ONLY),
+        s("tca-onehot","tca9548a","Channel select/readback exercise", "Temporarily select CH0–CH7, verify each control register readback, then restore original mask",Risk.CONFIG_CHANGE),
+        s("mcp-iocon","mcp23017","IOCON / configuration", "Read IOCON, IODIRA and IODIRB (BANK=0 assumed); no GPIO changes",Risk.READ_ONLY),
+        s("mcp-gpio","mcp23017","Read GPIO A + B", "Read 16 GPIO levels, input vs output direction and pull-ups",Risk.READ_ONLY),
+        s("mcp-olat","mcp23017","Read output latches", "Read OLATA / OLATB and interrupt flag registers",Risk.READ_ONLY),
+        s("mcp-pullup","mcp23017","Read pull-up configuration", "Read GPPUA and GPPUB; no state changes",Risk.READ_ONLY),
         s("ssd1306-checker","ssd1306","Checkerboard test", "Initialize 128×64 SSD1306 then draw checkerboard",Risk.DISPLAY_CHANGE),
         s("ssd1306-bars","ssd1306","Vertical bars", "Initialize SSD1306 then draw contrasting columns",Risk.DISPLAY_CHANGE),
         s("ssd1306-clear","ssd1306","Clear display", "Clear SSD1306 128×64 screen RAM",Risk.DISPLAY_CHANGE),
@@ -58,6 +64,11 @@ public final class DeviceScripts {
         s("ads1115-config","ads1115","Read ADC config", "Read 0x01 register without starting conversions",Risk.READ_ONLY),
         s("bh1750-light","bh1750","Read ambient light", "Read last measurement if module is already measuring",Risk.READ_ONLY),
         s("eeprom-bytes","eeprom","Read 16 EEPROM bytes", "Uses 8-bit address pointer; read-only memory access",Risk.READ_ONLY),
+        s("spi-nrf-status","spi-nrf24","nRF24L01+ status + configuration", "Read STATUS / CONFIG / SETUP_AW / RF_CH / RF_SETUP; CE remains untouched and no RF TX",Risk.READ_ONLY),
+        s("spi-nrf-fifo","spi-nrf24","nRF24 FIFO + feature registers", "Read FIFO_STATUS / DYNPD / FEATURE / OBSERVE_TX and carrier detect; no CE toggles",Risk.READ_ONLY),
+        s("spi-nrf-addresses","spi-nrf24","nRF24 pipe addresses", "Read RX_ADDR_P0, RX_ADDR_P1 and TX_ADDR, without changing them",Risk.READ_ONLY),
+        s("spi-mcp-directions","spi-mcp23s17","MCP23S17 direction / IOCON", "Read opcode 0x41, IOCON and both IODIR registers (BANK=0 assumed)",Risk.READ_ONLY),
+        s("spi-mcp-gpio","spi-mcp23s17","MCP23S17 GPIO / pull-ups", "Read GPIOA/B, GPPUA/B and OLATA/B; outputs are NOT toggled",Risk.READ_ONLY),
         s("spi-jedec","spi-flash","Read JEDEC ID", "0x9F manufacturer/device identification",Risk.READ_ONLY),
         s("spi-status","spi-flash","Read status register", "0x05 read status; no write-enable",Risk.READ_ONLY),
         s("spi-sfdp","spi-flash","Read SFDP header", "0x5A read Serial Flash Discoverable Parameters",Risk.READ_ONLY),
@@ -80,6 +91,49 @@ public final class DeviceScripts {
     public static String runI2c(String id,int address,I2c bus,Reporter log) throws IOException, InterruptedException {
         switch (id) {
             case "ack": return bus.probe(address) ? "ACK at " + hex(address) : "NACK at " + hex(address);
+            case "tca-mask": {
+                int mask=MuxTools.readMask(bus,address);
+                return String.format(Locale.US,"TCA9548A-compatible control register mask 0x%02X (%s). ACK/control read is not a unique chip ID.",
+                        mask,channelList(mask));
+            }
+            case "tca-onehot": {
+                StringBuilder result=new StringBuilder();
+                // Preserve whatever combination of channels the application found.
+                int old=MuxTools.readMask(bus,address);
+                IOException failure=null;
+                try {
+                    for(int ch=0;ch<8;ch++) {
+                        int mask=1<<ch;
+                        MuxTools.setMask(bus,address,mask);
+                        int returned=MuxTools.readMask(bus,address);
+                        if(returned!=mask) throw new IOException("Mux CH"+ch+" readback mismatch: "+hex(returned));
+                        result.append("CH").append(ch).append(" verified; ");
+                    }
+                } catch(IOException e) { failure=e;throw e; }
+                finally {
+                    try {MuxTools.setMask(bus,address,old);}
+                    catch(IOException e) {if(failure!=null)failure.addSuppressed(e);else throw new IOException("Could not restore mux mask",e);}
+                }
+                return result+String.format(Locale.US,"original mask 0x%02X restored",old);
+            }
+            case "mcp-iocon": case "mcp-gpio": case "mcp-olat": case "mcp-pullup": {
+                // BANK=0 power-up map only; reading individual registers avoids SEQOP assumptions.
+                int iocon=readMcpI2c(bus,address,0x0A);
+                if ((iocon&0x80)!=0) return "IOCON.BANK=1 reported; change to BANK=0 before using this register map. IOCON=0x"+hexByte(iocon);
+                if(id.equals("mcp-iocon")) return String.format(Locale.US,
+                    "MCP23017-compatible map, no unique ID. IOCON=%02X IODIRA=%02X IODIRB=%02X",
+                    iocon,readMcpI2c(bus,address,0x00),readMcpI2c(bus,address,0x01));
+                if(id.equals("mcp-gpio"))return String.format(Locale.US,
+                    "GPIOA=%02X GPIOB=%02X  IODIRA=%02X IODIRB=%02X (1=input,0=output)",
+                    readMcpI2c(bus,address,0x12),readMcpI2c(bus,address,0x13),
+                    readMcpI2c(bus,address,0x00),readMcpI2c(bus,address,0x01));
+                if(id.equals("mcp-pullup"))return String.format(Locale.US,
+                    "GPPUA=%02X GPPUB=%02X (1=pull-up enabled)",
+                    readMcpI2c(bus,address,0x0C),readMcpI2c(bus,address,0x0D));
+                return String.format(Locale.US,"OLATA=%02X OLATB=%02X INTFA=%02X INTFB=%02X",
+                    readMcpI2c(bus,address,0x14),readMcpI2c(bus,address,0x15),
+                    readMcpI2c(bus,address,0x0E),readMcpI2c(bus,address,0x0F));
+            }
             case "ssd1306-checker": oled(bus,address,false,"checker"); return "SSD1306 checkerboard written (128×64; profile not verified)";
             case "ssd1306-bars": oled(bus,address,false,"bars"); return "SSD1306 vertical bar pattern written";
             case "ssd1306-clear": oled(bus,address,false,"clear"); return "SSD1306 display RAM cleared";
@@ -184,8 +238,44 @@ public final class DeviceScripts {
             default: throw new IllegalArgumentException("Not an I2C script: "+id);
         }
     }
-    public static String runSpi(String id,Spi bus) throws IOException {
+    public static String runSpi(String id,Spi bus) throws IOException { return runSpi(id,bus,0); }
+    /** MCP23S17 address pins A2..A0 when IOCON.HAEN is enabled. */
+    public static String runSpi(String id,Spi bus,int hwAddress) throws IOException {
+        if(hwAddress<0||hwAddress>7)throw new IllegalArgumentException("SPI expander address 0..7");
         switch (id) {
+            case "spi-nrf-status": {
+                int[] regs={0x00,0x03,0x05,0x06,0x07};
+                int[] v=new int[regs.length];
+                for(int i=0;i<regs.length;i++)v[i]=nrfRead(bus,regs[i],1)[0]&255;
+                String verdict=(v[1]>=1&&v[1]<=3&&v[2]<=125&&v[0]!=255&&v[3]!=255)?
+                    "Plausible nRF24L01+ register values (NOT definitive identification)":"Unrecognized response; check 3.3 V, MISO, CE, CSN";
+                return String.format(Locale.US,
+                    "%s\nCONFIG=%02X  SETUP_AW=%02X  RF_CH=%02X (%.3f GHz)\nRF_SETUP=%02X  STATUS=%02X",
+                    verdict,v[0],v[1],v[2],2.400+v[2]/1000.0,v[3],v[4]);
+            }
+            case "spi-nrf-fifo": return String.format(Locale.US,
+                "FIFO_STATUS=%02X  DYNPD=%02X FEATURE=%02X OBSERVE_TX=%02X RPD=%02X",
+                nrfRead(bus,0x17,1)[0]&255,nrfRead(bus,0x1C,1)[0]&255,
+                nrfRead(bus,0x1D,1)[0]&255,nrfRead(bus,0x08,1)[0]&255,nrfRead(bus,0x09,1)[0]&255);
+            case "spi-nrf-addresses": return "RX_ADDR_P0="+Hex.format(nrfRead(bus,0x0A,5))+
+                    "\nRX_ADDR_P1="+Hex.format(nrfRead(bus,0x0B,5))+
+                    "\nTX_ADDR="+Hex.format(nrfRead(bus,0x10,5))+
+                    "\nNote: pipe addresses may be sensitive; copy logs deliberately.";
+            case "spi-mcp-directions": {
+                int control=readMcpSpi(bus,hwAddress,0x0A);
+                if ((control&0x80)!=0)return "IOCON.BANK=1 possibly enabled; alternate map not decoded. Readback="+hexByte(control);
+                return String.format(Locale.US,"MCP23S17-compatible register reads (no unique ID). A2:A0=%d; IOCON=%02X IODIRA=%02X IODIRB=%02X",
+                    hwAddress,control,readMcpSpi(bus,hwAddress,0x00),readMcpSpi(bus,hwAddress,0x01));
+            }
+            case "spi-mcp-gpio": {
+                int control=readMcpSpi(bus,hwAddress,0x0A);
+                if((control&0x80)!=0)return "BANK=1 possibly enabled; this profile assumes BANK=0";
+                return String.format(Locale.US,"SPI MCP23S17 A2:A0=%d: GPIOA=%02X GPIOB=%02X GPPUA=%02X GPPUB=%02X OLATA=%02X OLATB=%02X",
+                    hwAddress,readMcpSpi(bus,hwAddress,0x12),readMcpSpi(bus,hwAddress,0x13),
+                    readMcpSpi(bus,hwAddress,0x0C),readMcpSpi(bus,hwAddress,0x0D),
+                    readMcpSpi(bus,hwAddress,0x14),readMcpSpi(bus,hwAddress,0x15));
+            }
+
             case "spi-jedec": {
                 byte[] b=bus.transfer(Hex.parse("9F 00 00 00"));
                 length(b,4);
@@ -208,6 +298,31 @@ public final class DeviceScripts {
             }
             default: throw new IllegalArgumentException("Not an SPI script: " + id);
         }
+    }
+    private static int readMcpI2c(I2c bus,int addr,int reg) throws IOException {
+        byte[] b=bus.read(addr,new byte[]{(byte)reg},1);
+        length(b,1);return u(b[0]);
+    }
+    private static int readMcpSpi(Spi bus,int hardwareAddress,int reg) throws IOException {
+        int opcode=0x41 | (hardwareAddress<<1);
+        byte[] b=bus.transfer(new byte[]{(byte)opcode,(byte)reg,0});
+        length(b,3);return u(b[2]);
+    }
+    private static byte[] nrfRead(Spi bus,int reg,int count) throws IOException {
+        if(reg<0 || reg>0x1F || count<1 || count>5)throw new IllegalArgumentException("Invalid nRF24 read");
+        byte[] command=new byte[1+count];command[0]=(byte)reg; // R_REGISTER=0x00 | register
+        byte[] reply=bus.transfer(command);
+        length(reply,command.length);
+        return Arrays.copyOfRange(reply,1,reply.length);
+    }
+    private static String hexByte(int value) {return String.format(Locale.US,"%02X",value);}
+    private static String channelList(int mask) {
+        if(mask==0)return "all channels disconnected";
+        StringBuilder s=new StringBuilder();
+        for(int n=0;n<8;n++)if((mask&(1<<n))!=0) {
+            if(s.length()>0)s.append(", ");s.append("CH").append(n);
+        }
+        return s.toString();
     }
     private static void si4713Command(I2c bus,int address,byte[] cmd,Reporter reporter) throws IOException, InterruptedException {
         bus.write(address,cmd);

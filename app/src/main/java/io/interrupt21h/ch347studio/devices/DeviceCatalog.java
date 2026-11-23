@@ -21,6 +21,8 @@ public final class DeviceCatalog {
         }
     }
     public static final List<Profile> I2C = Collections.unmodifiableList(Arrays.asList(
+        new Profile("tca9548a", "TCA9548A / PCA9548A I²C 8-way mux", "Peripheral", "NOYITO or GODIYMODULES breakout; 0x70–0x77 by A0/A1/A2; bus matrix can scan each branch separately",0x70,0x71,0x72,0x73,0x74,0x75,0x76,0x77),
+        new Profile("mcp23017", "MCP23017 16-bit I²C I/O expander", "Peripheral", "MCP23017, not MCP23S17 (SPI variant); 0x20–0x27; register snapshot assumes BANK=0",0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27),
         new Profile("ssd1306", "SSD1306 OLED", "Display", "128×32 / 128×64 candidates; ACK cannot distinguish from SH1106", 0x3C, 0x3D),
         new Profile("sh1106", "SH1106 OLED", "Display", "132-column RAM, usually visible 128 columns; requires explicit selection", 0x3C, 0x3D),
         new Profile("pcf8574", "PCF8574 / HD44780 LCD", "Display", "PCF8574 I/O expanders can drive 16×2 LCDs; pin mapping varies", 0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x38,0x39,0x3A,0x3B,0x3C,0x3D,0x3E,0x3F),

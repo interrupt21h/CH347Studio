@@ -1,6 +1,18 @@
-# CH347 Studio v0.2.0 — Android USB/I²C/SPI Device Workbench
+# CH347 Studio v0.3.0 — Android USB/I²C/SPI Device Workbench
 
 A native Java Android application for WCH CH347T-compatible USB Host/OTG adapters (including the Waveshare USB to UART/I²C/SPI/JTAG box). Offline, no root, no account, no Internet permission. The current transport is CH347 vendor BULK (M1 recommended), with CDC UART supported where exposed. M2 HID, CH343 UART and JTAG operations remain unimplemented.
+
+## 0.3.0 — user-photographed peripherals
+
+- TCA9548A / PCA9548A eight-way I²C bus mux: both NOYITO and GODIYMODULES breakouts, `0x70..0x77`, select a downstream channel and scan its dedicated 128-cell address matrix. Mux mask restored after every scan or routed transaction, including errors. Readback exercise requires deliberate confirmation.
+- MCP23017 16-bit I²C GPIO expander: read directions, inputs, pullups, latches and interrupts (no automatic output writes).
+- MCP23S17 16-bit SPI GPIO expander: separate read-only driver with 0–7 hardware address selection; `IOCON.HAEN`/`BANK` caveats.
+- Aideepen nRF24L01+PA+LNA: SPI read-only STATUS/CONFIG/FIFO/features/pipe-address checks. CE is not controlled, RF transmission is not started. Stable 3.3 V power is critical.
+- ShengYang GC9A01 1.28-inch round TFT: 240×240 RGB565 local preview with color bars, grayscale, checker/crosshair and annotated SPI wiring. Physical update requires D/C + reset + backlight GPIO; it remains disabled.
+- LAFVIN 2.13-inch e-paper: existing local frame previews; confirm pictured HAT's 3/4-wire SPI setting and version before pursuing GPIO-controlled refresh.
+- Higher confidence discovery: I²C ACK is not a chip identity, and SPI has no generic device scan. Profiles are candidate matches only.
+
+See [HARDWARE.md](HARDWARE.md) for schematics guidance, wiring limitations, safe tests and reference datasheets.
 
 ## v0.2.0 changes
 

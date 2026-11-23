@@ -37,8 +37,11 @@ import io.interrupt21h.ch347studio.devices.BusMap;
 import io.interrupt21h.ch347studio.devices.DeviceCatalog;
 import io.interrupt21h.ch347studio.devices.DeviceScripts;
 import io.interrupt21h.ch347studio.devices.EpaperFrames;
+import io.interrupt21h.ch347studio.devices.Gc9a01Frames;
+import io.interrupt21h.ch347studio.devices.MuxTools;
 import io.interrupt21h.ch347studio.ui.BusMatrixView;
 import io.interrupt21h.ch347studio.ui.EpaperPreviewView;
+import io.interrupt21h.ch347studio.ui.Gc9a01PreviewView;
 import io.interrupt21h.ch347studio.protocol.Hex;
 import io.interrupt21h.ch347studio.usb.CdcUart;
 import io.interrupt21h.ch347studio.usb.Ch347Usb;
@@ -50,6 +53,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,7 +83,23 @@ public final class MainActivity extends Activity {
     private BusMatrixView addressMatrix;
     private EditText selectedAddressField;
     private final AtomicBoolean busy = new AtomicBoolean(false);
-    private int spiMode = 0, spiClock = 6, spiCs = 0;
+    private int spiMode = 0, spiClock = 6, spiCs = 0, spiHardwareAddress = 0;
+    // Mux channel maps are kept separate from the upstream bus and from one another.
+    private final Map<Integer,BusMap[]> muxMaps=new HashMap<>();
+    private int activeMuxAddress=-1,activeMuxChannel=-1;
+
+    private BusMap activeBusMap() {
+        if(activeMuxAddress<0 || activeMuxChannel<0) return busMap;
+        BusMap[] channels=muxMaps.get(activeMuxAddress);
+        if(channels==null){
+            channels=new BusMap[8];for(int i=0;i<8;i++)channels[i]=new BusMap();
+            muxMaps.put(activeMuxAddress,channels);
+        }
+        return channels[activeMuxChannel];
+    }
+    private String routeLabel(){return activeMuxAddress<0?"upstream":
+            String.format(Locale.US,"0x%02X / CH%d",activeMuxAddress,activeMuxChannel);}
+
 
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
@@ -97,7 +118,7 @@ public final class MainActivity extends Activity {
                     log("CH347 removed; closing interfaces");
                     disconnect(); selected = null;
                 }
-                busMap.reset();
+                busMap.reset();muxMaps.clear();
                 render();
             } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
                 log("USB device attached"); refreshDevices(); render();
@@ -176,7 +197,7 @@ public final class MainActivity extends Activity {
         if (d == null || !usbManager.hasPermission(d)) return;
         runWork("Connecting USB bridge", () -> {
             closeBridge();
-            busMap.reset();
+            busMap.reset();muxMaps.clear();
             int pid = d.getProductId();
             if (pid == 0x55DA || pid == 0x55DC) {
                 log("Detected " + Ch347Usb.modeName(pid) + "; native vendor BULK I²C/SPI not available");
@@ -230,12 +251,13 @@ public final class MainActivity extends Activity {
         applySystemBarInsets(root);
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.VERTICAL); heading.setPadding(dp(20), dp(8), dp(20), dp(14));
-        TextView eyebrow = text("CH347  /  HARDWARE LAB  ·  v0.2.0", 10, MINT, true);
+        TextView eyebrow = text("CH347  /  HARDWARE LAB  ·  v0.3.0", 10, MINT, true);
         eyebrow.setLetterSpacing(0.16f); heading.addView(eyebrow);
         TextView title = text("CH347 Studio", 27, WHITE, true); title.setPadding(0, dp(4), 0, dp(6)); heading.addView(title);
         status = text("", 12, MUTED, false); heading.addView(status);
-        TextView overview = text("BUS SCAN   " + busMap.count(BusMap.ACK) + " responding     ·     " +
-                busMap.scanned() + "/112 checked", 11, MINT, true);
+        BusMap shown=activeBusMap();
+        TextView overview = text("BUS " + routeLabel().toUpperCase(Locale.US) + "   " +
+                shown.count(BusMap.ACK) + " ACK     ·     " + shown.scanned() + "/112 checked", 11, MINT, true);
         overview.setPadding(0, dp(8), 0, 0); heading.addView(overview);
         root.addView(heading);
         HorizontalScrollView tabScroller = new HorizontalScrollView(this);
@@ -343,11 +365,28 @@ public final class MainActivity extends Activity {
 
     private void i2cPanel() {
         blockTitle("I²C bus analyzer", "Tap an address to inspect candidates. Green cells ACK; red cells had transfer errors. Address ≠ chip ID.");
+        LinearLayout route=card();
+        route.addView(text("Bus topology / TCA9548A channels",17,WHITE,true));
+        detail(route,"Both photographed TCA9548A modules are the same chip family. Select upstream or an individual switch branch. Downstream scans temporarily isolate that channel and restore the original switch mask even on error.");
+        String[] muxAddresses=new String[8];
+        for(int i=0;i<8;i++)muxAddresses[i]=String.format(Locale.US,"TCA9548A at 0x%02X  %s",0x70+i,
+            busMap.get(0x70+i)==BusMap.ACK?"● detected ACK":"○ unverified");
+        Spinner mux=spinner(route,muxAddresses,activeMuxAddress<0?0:activeMuxAddress-0x70);
+        Spinner ch=spinner(route,new String[]{"Upstream bus (direct)","Channel 0","Channel 1","Channel 2","Channel 3","Channel 4","Channel 5","Channel 6","Channel 7"},activeMuxChannel<0?0:activeMuxChannel+1);
+        action(route,"Switch matrix to selected route",false,()->{
+            if(busy.get()) {log("A bus operation is running; switch routes after it finishes");return;}
+            int c=ch.getSelectedItemPosition();
+            activeMuxAddress=c==0?-1:0x70+mux.getSelectedItemPosition();
+            activeMuxChannel=c-1;
+            render();
+        });
+        detail(route,"Current view: "+routeLabel()+". The root scan may include devices behind channels previously enabled by other controllers; address ACK is not a verified chip ID.");
         LinearLayout matrixCard = card();
-        matrixCard.addView(text("7-bit address matrix  /  0x00–0x7F", 16, WHITE, true));
-        detail(matrixCard, "" + busMap.count(BusMap.ACK) + " responding  ·  " + busMap.count(BusMap.ERROR) +
-                " errors  ·  " + busMap.scanned() + "/112 scanned   ·   reserved addresses dimmed");
-        addressMatrix = new BusMatrixView(this, busMap);
+        BusMap matrix=activeBusMap();
+        matrixCard.addView(text("7-bit matrix  /  "+routeLabel()+"  /  0x00–0x7F", 16, WHITE, true));
+        detail(matrixCard, matrix.count(BusMap.ACK) + " responding  ·  " + matrix.count(BusMap.ERROR) +
+                " errors  ·  " + matrix.scanned() + "/112 scanned   ·   reserved addresses dimmed");
+        addressMatrix = new BusMatrixView(this, matrix);
         addressMatrix.setSelectedAddress(selectedAddress);
         matrixCard.addView(addressMatrix, new LinearLayout.LayoutParams(-1, -2));
         TextView selection = text(String.format(Locale.US,"0x%02X • %s",selectedAddress,
@@ -358,14 +397,19 @@ public final class MainActivity extends Activity {
             if (selectedAddressField != null)
                 selectedAddressField.setText(String.format(Locale.US,"%02X",address));
             selection.setText(String.format(Locale.US,"0x%02X • %s   [%s]",address,
-                DeviceCatalog.hint(address),busMap.get(address)==BusMap.ACK?"ACK": "unverified"));
+                DeviceCatalog.hint(address),matrix.get(address)==BusMap.ACK?"ACK": "unverified"));
         });
         action(matrixCard, "Explore profiles for selected address", false, () -> {
             List<DeviceCatalog.Profile> candidates=DeviceCatalog.candidates(selectedAddress);
             if(candidates.isEmpty()) { log("No profile for 0x" + Integer.toHexString(selectedAddress)); return; }
-            String category=candidates.get(0).category;
-            currentTab=category.equals("Display")?2:category.equals("Radio")?3:4;
-            render();
+            String[] options=new String[candidates.size()];
+            for(int n=0;n<candidates.size();n++)options[n]=candidates.get(n).name;
+            new AlertDialog.Builder(this).setTitle(String.format(Locale.US,"0x%02X  ·  candidate profiles",selectedAddress))
+                .setItems(options,(dialog,position)->{
+                    String category=candidates.get(position).category;
+                    currentTab=category.equals("Display")?2:category.equals("Radio")?3:4;
+                    render();
+                }).setNegativeButton("Cancel",null).show();
         });
         LinearLayout settings = card();
         settings.addView(text("Bus configuration", 16, WHITE, true));
@@ -378,22 +422,33 @@ public final class MainActivity extends Activity {
         scan.addView(text("Address discovery", 16, WHITE, true));
         detail(scan, "Probes 0x08–0x77 using an address-only write. NACKs are normal; transfer failures are reported separately.");
         TextView addresses = text("No scan performed", 13, MUTED, false); scan.addView(addresses);
-        action(scan, "Scan I²C bus", true, () -> {
+        action(scan, "Scan selected route", true, () -> {
             int selectedSpeed = speed.getSelectedItemPosition();
             runWork("I²C scan", () -> {
                 Ch347Usb b = requireBridge(); b.i2cSpeed(selectedSpeed);
                 List<String> found = new ArrayList<>();
-                busMap.reset();
+                BusMap scanMap=activeBusMap();
+                if(activeMuxAddress>=0) {
+                    int muxAddr=activeMuxAddress,muxChannel=activeMuxChannel;
+                    MuxTools.scanChannel(rootTransport(),muxAddr,muxChannel,scanMap,(address,state)->{
+                        if(state==BusMap.ACK)found.add(String.format(Locale.US,"0x%02X  •  %s",address,DeviceCatalog.hint(address)));
+                        if((address&7)==0) {
+                            setTask(String.format(Locale.US,"Mux 0x%02X CH%d scan… 0x%02X",muxAddr,muxChannel,address));
+                            runOnUiThread(()->{if(addressMatrix!=null)addressMatrix.invalidate();});
+                        }
+                    });
+                } else {
+                scanMap.reset();
                 for (int a = 0x08; a <= 0x77; a++) {
                     if (Thread.currentThread().isInterrupted() || b != bridge)
                         throw new InterruptedException("Scan interrupted / adapter detached");
                     try {
                         if (b.i2cProbe(a)) {
-                            busMap.record(a, BusMap.ACK);
+                            scanMap.record(a, BusMap.ACK);
                             found.add(String.format(Locale.US,"0x%02X  •  %s",a,DeviceCatalog.hint(a)));
-                        } else busMap.record(a, BusMap.EMPTY);
+                        } else scanMap.record(a, BusMap.EMPTY);
                     } catch (IOException probeError) {
-                        busMap.record(a, BusMap.ERROR);
+                        scanMap.record(a, BusMap.ERROR);
                         log(String.format(Locale.US,"I²C 0x%02X transfer error: %s",a,probeError.getMessage()));
                     }
                     if ((a & 7) == 0) {
@@ -401,8 +456,9 @@ public final class MainActivity extends Activity {
                         runOnUiThread(() -> { if (addressMatrix != null) addressMatrix.invalidate(); });
                     }
                 }
+                }
                 final String summary=found.isEmpty()?"No ACKs detected. Check SDA/SCL, pull-ups, voltage and adapter mode.":String.join("\n", found);
-                log("Scan complete: " + found.size() + " ACKs, " + busMap.count(BusMap.ERROR) + " errors");
+                log("Scan " + routeLabel() + " complete: " + found.size() + " ACKs, " + scanMap.count(BusMap.ERROR) + " errors");
                 runOnUiThread(() -> { addresses.setText(summary); render(); });
             });
         });
@@ -418,7 +474,7 @@ public final class MainActivity extends Activity {
             int a = hexAddress(addr.getText().toString());
             byte[] payload = Hex.parse(out.getText().toString());
             Ch347Usb b = requireBridge(); b.i2cSpeed(speed.getSelectedItemPosition());
-            b.i2cWrite(a, payload);
+            transport().write(a, payload);
             log(String.format(Locale.US,"I²C write 0x%02X TX: %s (ACK)", a, Hex.format(payload)));
             runOnUiThread(() -> result.setText("Write ACK  /  " + payload.length + " payload bytes"));
         }));
@@ -426,7 +482,7 @@ public final class MainActivity extends Activity {
             int a = hexAddress(addr.getText().toString());
             int count = Integer.parseInt(read.getText().toString().trim());
             Ch347Usb b = requireBridge(); b.i2cSpeed(speed.getSelectedItemPosition());
-            byte[] bytes = b.i2cRead(a, new byte[0], count);
+            byte[] bytes = transport().read(a, new byte[0], count);
             log(String.format(Locale.US,"I²C read 0x%02X RX: %s", a, Hex.format(bytes)));
             runOnUiThread(() -> result.setText("RX  " + Hex.format(bytes)));
         }));
@@ -435,7 +491,7 @@ public final class MainActivity extends Activity {
             int count = Integer.parseInt(read.getText().toString().trim());
             byte[] prefix = Hex.parse(out.getText().toString());
             Ch347Usb b = requireBridge(); b.i2cSpeed(speed.getSelectedItemPosition());
-            byte[] bytes = b.i2cRead(a, prefix, count);
+            byte[] bytes = transport().read(a, prefix, count);
             log(String.format(Locale.US,"I²C combined 0x%02X prefix %s → %s", a, Hex.format(prefix), Hex.format(bytes)));
             runOnUiThread(() -> result.setText("RX  " + Hex.format(bytes)));
         }));
@@ -446,9 +502,9 @@ public final class MainActivity extends Activity {
 
     private void profilePanel(String category) {
         String title = category.equals("Display") ? "I²C display laboratory" :
-                category.equals("Radio") ? "FM radio diagnostics" : "Sensor & peripheral diagnostics";
-        blockTitle(title,"Select the exact module and address before a script. ACK addresses are candidate matches, not guaranteed identities.");
-        if (busMap.scanned() == 0) {
+                category.equals("Radio") ? "FM radio diagnostics" : "Sensors, muxes & GPIO";
+        blockTitle(title,"Bus route: "+routeLabel()+". Select exact module/address; ACK matches are candidate profiles only.");
+        if (activeBusMap().scanned() == 0) {
             LinearLayout intro=card();
             intro.addView(text("Start with a bus scan",16,WHITE,true));
             detail(intro,"Open I²C BUS and run the full scan; modules can also be tested with manually selected addresses before scanning.");
@@ -470,7 +526,7 @@ public final class MainActivity extends Activity {
             int prefer=0;
             for(int k=0;k<profile.addresses.length;k++){
                 int address=profile.addresses[k];
-                boolean found=busMap.get(address)==BusMap.ACK;
+                boolean found=activeBusMap().get(address)==BusMap.ACK;
                 addrLabels[k]=String.format(Locale.US,"0x%02X  %s",address,found?"● ACK":"○ unverified");
                 if(found)prefer=k;
                 if(address==selectedAddress)prefer=k;
@@ -490,17 +546,38 @@ public final class MainActivity extends Activity {
         if(num==0)detail(card(),"No profiles for this category");
     }
 
-    private DeviceScripts.I2c transport() {
+    private DeviceScripts.I2c rootTransport() {
         return new DeviceScripts.I2c() {
-            @Override public boolean probe(int a) throws IOException { return requireBridge().i2cProbe(a); }
-            @Override public byte[] read(int a,byte[] prefix,int count) throws IOException { return requireBridge().i2cRead(a,prefix,count); }
-            @Override public void write(int a,byte[] bytes) throws IOException { requireBridge().i2cWrite(a,bytes); }
+            @Override public boolean probe(int a) throws IOException {return requireBridge().i2cProbe(a);}
+            @Override public byte[] read(int a,byte[] prefix,int count) throws IOException {return requireBridge().i2cRead(a,prefix,count);}
+            @Override public void write(int a,byte[] bytes) throws IOException {requireBridge().i2cWrite(a,bytes);}
+        };
+    }
+    private interface I2cOp<T> { T run() throws Exception; }
+    private <T> T routed(I2cOp<T> operation) throws IOException {
+        try {
+            if(activeMuxAddress<0) return operation.run();
+            return MuxTools.withChannel(rootTransport(),activeMuxAddress,activeMuxChannel,operation::run);
+        } catch(IOException e) {throw e;}
+          catch(Exception e) {throw new IOException("Mux operation failed: "+e.getMessage(),e);}
+    }
+    private DeviceScripts.I2c transport() {
+        DeviceScripts.I2c raw=rootTransport();
+        return new DeviceScripts.I2c() {
+            @Override public boolean probe(int address) throws IOException {return routed(()->raw.probe(address));}
+            @Override public byte[] read(int address,byte[] prefix,int count) throws IOException {
+                return routed(()->raw.read(address,prefix,count));
+            }
+            @Override public void write(int address,byte[] bytes) throws IOException {
+                routed(()->{raw.write(address,bytes);return null;});
+            }
         };
     }
 
     private void executeI2cScript(DeviceScripts.Script test,int address) {
         Runnable go=()-> runWork(test.title,()-> {
-            String outcome=DeviceScripts.runI2c(test.id,address,transport(),this::log);
+            DeviceScripts.I2c testBus=test.profile.equals("tca9548a")?rootTransport():transport();
+            String outcome=DeviceScripts.runI2c(test.id,address,testBus,this::log);
             log(String.format(Locale.US,"%s @ 0x%02X\n%s",test.title,address,outcome));
             runOnUiThread(()-> new AlertDialog.Builder(this).setTitle(test.title)
                     .setMessage(outcome).setPositiveButton("Close",null).show());
@@ -514,14 +591,14 @@ public final class MainActivity extends Activity {
     private void executeSpiScript(DeviceScripts.Script test) {
         Runnable go=()->runWork(test.title,()-> {
             String output=DeviceScripts.runSpi(test.id,
-                  data -> requireBridge().spiTransfer(spiMode,spiClock,spiCs,data));
+                  data -> requireBridge().spiTransfer(spiMode,spiClock,spiCs,data),spiHardwareAddress);
             log(test.title + " • " + output);
             runOnUiThread(()-> new AlertDialog.Builder(this).setTitle(test.title)
                     .setMessage(output).setPositiveButton("Close",null).show());
         });
         if(test.risk==DeviceScripts.Risk.READ_ONLY)go.run();
         else new AlertDialog.Builder(this).setTitle("Verify SPI setup")
-                .setMessage(test.detail + "\n\nDisconnect all target devices for the loopback test, and physically connect MOSI to MISO.")
+                .setMessage(test.detail + "\n\nFor isolated loopback, disconnect ALL targets and connect MOSI to MISO. Confirm 3.3 V device compatibility.")
                 .setNegativeButton("Cancel",null).setPositiveButton("Run test",(dialog,which)->go.run()).show();
     }
 
@@ -548,17 +625,40 @@ public final class MainActivity extends Activity {
         LinearLayout tip = card();
         tip.addView(text("Hardware safety", 16, WHITE, true));
         detail(tip, "Begin at 937.5 kHz with short wires. Ensure GND is shared. Do not connect an unpowered target or exceed its voltage rating. Bytes such as 9F can issue commands to attached flash chips.");
-        LinearLayout suites = card();
-        suites.addView(text("SPI device test scripts", 17, WHITE, true));
-        detail(suites, "Tests run only when selected. JEDEC/SFDP identify compatible flash chips, not the e-paper display.");
-        for (DeviceScripts.Script test : DeviceScripts.ALL) {
-            if (!test.profile.startsWith("spi-")) continue;
-            action(suites, "▶  " + test.title, false, () -> {
-                spiMode = mode.getSelectedItemPosition();spiClock = clock.getSelectedItemPosition();spiCs = cs.getSelectedItemPosition();
-                executeSpiScript(test);
-            });
-            detail(suites,test.detail + "  •  " + test.risk.name().replace('_',' '));
+        LinearLayout suites=card();
+        suites.addView(text("Hardware-aware SPI diagnostics",17,WHITE,true));
+        detail(suites,"SPI devices have NO I²C-style address scan. Read-only register diagnostics use manually selected CS, mode and clock. No automatic writes to a radio or display.");
+        Spinner hwAddr=spinner(suites,new String[]{"MCP23S17 address 0","MCP23S17 address 1","MCP23S17 address 2","MCP23S17 address 3","MCP23S17 address 4","MCP23S17 address 5","MCP23S17 address 6","MCP23S17 address 7"},spiHardwareAddress);
+        String[][] groups={
+            {"spi-nrf24","nRF24L01+PA+LNA  ·  Aideepen", "Read configuration, FIFO/FEATURE and addresses only. Requires stable 3.3 V with adequate current for PA/LNA, CSN/SCK/MOSI/MISO, CE held LOW. TX/RX need a dedicated CE control; no RF transmitted by these scripts."},
+            {"spi-mcp23s17","MCP23S17 16-bit SPI GPIO expander", "Only the SPI-labeled chip, NOT MCP23017. SCK/MOSI/MISO/CS, VDD/GND. Hardware A0–A2 selected above; IOCON.HAEN may need external setup. Register snapshot assumes BANK=0."},
+            {"spi-flash","SPI NOR flash", "JEDEC / status / SFDP discovery requires actual NOR flash; do not use it on e-paper or TFT controllers."},
+            {"spi-tools","Isolated SPI diagnostic", "Loopback MOSI→MISO with ALL external devices disconnected."}
+        };
+        for(String[] group:groups){
+            LinearLayout c=card();c.addView(text(group[1],16,WHITE,true));detail(c,group[2]);
+            for(DeviceScripts.Script test:DeviceScripts.forProfile(group[0])){
+                action(c,"▶  "+test.title,test.risk==DeviceScripts.Risk.READ_ONLY,()->{
+                    spiMode=mode.getSelectedItemPosition();spiClock=clock.getSelectedItemPosition();spiCs=cs.getSelectedItemPosition();
+                    spiHardwareAddress=hwAddr.getSelectedItemPosition();
+                    executeSpiScript(test);
+                });
+                detail(c,test.detail);
+            }
         }
+        LinearLayout gc=card();
+        gc.addView(text("1.28-inch GC9A01 round TFT  ·  240×240",18,WHITE,true));
+        detail(gc,"From the photographed ShengYang board. It is 4-wire SPI, not I²C. It needs D/C, RESET and optionally BLK GPIO beyond SPI; arbitrary SPI probes cannot identify it safely.");
+        detail(gc,"WIRING   SCL→SCK, SDA→MOSI, CS→CS0; D/C, RES, BLK need GPIO. Verify module power requirements; do not connect to 5 V I/O without level shifting.");
+        Spinner gcPattern=spinner(gc,new String[]{"Solid black","RGB / CMY bars","Grayscale gradient","Crosshair / checker"},1);
+        Gc9a01PreviewView gcPreview=new Gc9a01PreviewView(this);
+        gc.addView(gcPreview,new LinearLayout.LayoutParams(-1,-2));
+        action(gc,"Preview round TFT pattern",false,()->gcPreview.setPattern(gcPattern.getSelectedItemPosition()));
+        action(gc,"Copy GC9A01 wiring / command plan",false,()->{
+            ClipboardManager cb=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+            cb.setPrimaryClip(ClipData.newPlainText("GC9A01 SPI wiring",Gc9a01Frames.wiring()));
+        });
+        detail(gc,"A 240×240 RGB565 frame is 115,200 bytes. This local preview is functional; panel initialization and live pixel transfer are disabled until the required GPIO wiring/controller initialization are validated.");
         LinearLayout epaper = card();
         epaper.addView(text("LAFVIN 2.13-inch e-paper HAT  ·  V4", 18, WHITE, true));
         detail(epaper, "122 × 250 mono pixels. SPI alone is insufficient: D/C, RESET and BUSY must also be controlled and observed. The CH347 cannot identify this write-only display through a JEDEC ID request.");
