@@ -53,3 +53,28 @@ The user-supplied module photos show two TCA9548A eight-channel I²C switch boar
 - Microchip MCP23017/MCP23S17 (register map and SPI opcode): https://ww1.microchip.com/downloads/en/DeviceDoc/20001952C.pdf
 - Nordic nRF24L01+ register definitions (community RF24 source): https://github.com/nRF24/RF24/blob/master/nRF24L01.h
 - Adafruit GC9A01 round TFT (four-wire control): https://learn.adafruit.com/adafruit-1-28-240x240-round-tft-lcd?view=all
+
+## v0.4 — MCP23017 as auxiliary GPIO for CH347 M1 mode
+
+1. Connect CH347 I²C SDA ↔ MCP23017 SDA, SCL ↔ SCL, **3.3 V** ↔ VDD, GND ↔ GND, and hold MCP23017 RESET high. Use suitable SDA/SCL pull-ups to the selected I/O supply voltage. Address pins A0/A1/A2 determine 0x20..0x27; default all LOW = 0x20. Verify module board labels and jumpers.
+2. Select **M1** on the CH347 with its USB power disconnected. Reconnect and authorize CH347 Studio USB access. The GPIO controller uses the **upstream I²C bus** (not a selected TCA9548A downstream branch). Enable it from the GPIO tab.
+3. Assign roles to GPAx/GPBx. The initial default mapping is below; **nothing is driven until explicitly armed**. Change the mapping before arming if your wiring differs.
+
+| Role | Default MCP23017 pin | Direction | Arm state |
+| --- | --- | --- | --- |
+| E-paper RESET | GPA0 | output | HIGH (not in reset) |
+| E-paper D/C | GPA1 | output | LOW (command) |
+| E-paper BUSY | GPA2 | input | high impedance |
+| nRF24L01 CE | GPA3 | output | LOW (inactive) |
+| nRF24L01 IRQ | GPA4 | input | high impedance |
+| GC9A01 RESET | GPA5 | output | HIGH (not in reset) |
+| GC9A01 D/C | GPA6 | output | LOW (command) |
+| GC9A01 BLK | GPA7 | output | LOW (commonly off; varies by board) |
+
+4. **E-paper**: connect CS/MOSI/SCLK via CH347 SPI and RST, D/C and BUSY to assigned MCP23017 pins. Start with BUSY read, then a deliberate 10 ms RESET pulse. **Full refresh remains unavailable** because the purchased LAFVIN hardware controller and waveform version have not been bench-verified.
+5. **GC9A01 TFT**: connect CS/SCLK/MOSI via CH347 SPI and RST/D-C/BLK via MCP23017. Preview the color pattern before using the explicit experimental hardware transfer; the app sends standard DCS sleep-out, display-on and frame write, but some controllers require their own power/gamma initialization. BLK may need a separate transistor or no GPIO drive at all: check the breakout.
+6. **nRF24L01+PA+LNA**: SPI CE does not mean chip select; connect the *radio's CSN* to CH347 CS0/CS1, and CE plus IRQ separately to MCP23017. CE defaults LOW on arming. The app can set CE low, sample IRQ, and issue a 15 ms CE pulse under separate RF confirmation. A preloaded TX FIFO may transmit during the pulse. Use a regulated 3.3 V power source sized for the PA amplifier and external pull-down on CE.
+
+The MCP23017 requires a normal IOCON **BANK=0** register layout (`IODIRA=0x00`, `IODIRB=0x01`, `GPIOA=0x12`, `OLATA=0x14`). This app reads IOCON mirrored addresses and rejects obvious non-default mappings, but cannot guarantee a correct layout if arbitrary external firmware has already reconfigured the chip. Use a dedicated reset MCP23017 on known wiring. Application confirmation cannot protect a miswired target; use external pull resistors and level matching.
+
+**Limitations:** GPIO via USB → I²C is too slow and nondeterministic for microsecond timing or bit-banged SPI; CH347 hardware SPI handles the data clock. The nRF CE pulse is millisecond-scale. There is no automatic hardware GPIO discovery beyond the I²C ACK/readback, and real module testing remains outstanding.

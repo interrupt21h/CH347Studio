@@ -1,4 +1,4 @@
-# CH347 Studio v0.3.0 — Android USB/I²C/SPI Device Workbench
+# CH347 Studio v0.4.0 — Android USB/I²C/SPI/GPIO Device Workbench
 
 A native Java Android application for WCH CH347T-compatible USB Host/OTG adapters (including the Waveshare USB to UART/I²C/SPI/JTAG box). Offline, no root, no account, no Internet permission. The current transport is CH347 vendor BULK (M1 recommended), with CDC UART supported where exposed. M2 HID, CH343 UART and JTAG operations remain unimplemented.
 
@@ -73,3 +73,20 @@ The CI workflow runs protocol and device diagnostics unit tests, builds and lint
 - [Android USB Host reference](https://developer.android.com/develop/connectivity/usb/host).
 
 MIT-licensed original Android application. No bundled third-party code from GPL projects.
+
+## v0.4.0 — GPIO expansion and hardware control
+
+**MCP23017 I²C GPIO** is available in the new **GPIO** tab. Connect a real MCP23017 (not the pin-compatible SPI MCP23S17) at `0x20–0x27` on the upstream I²C bus. Configure pin routing in-app and explicitly ARM outputs after checking the wiring. The mapping survives app restarts; GPIO output arming deliberately does not.
+
+- A 16-pin register readback shows GPA0..GPA7 and GPB0..GPB7, direction and actual level, with optional 1.5-second polling.
+- Per-pin manual input/high/low testing requires confirmation before changing the direction or output. The first write to any output sets its latch to the desired level **before** enabling the driver.
+- Device controls: panel reset pulses, e-paper BUSY input sample, GC9A01 D/C and backlight, nRF24L01 CE-low/IRQ sample, and an explicit timed CE pulse (may activate RF depending on the existing radio state).
+- GC9A01 experimental hardware mode sends a minimal standard DCS wake sequence followed by a 240×240 RGB565 frame. **Some panel variants need a vendor-specific initialization sequence**; a successful SPI transfer does not prove the image appeared.
+- E-paper waveform-dependent refresh is **not enabled** without a confirmed controller/revision. RESET and BUSY tests use GPIO and are explicitly authorized.
+- Pin changes are serialized through the existing single USB worker; MCP23017 updates preserve unrelated pins using register read/modify/write. An explicit `IOCON.BANK=0` mapping is required.
+
+Use **3.3 V logic** for these targets. The MCP23017 pins are logic outputs, not high-current display/backlight power supplies; use a suitable transistor/driver where required. Supply the nRF24L01+PA+LNA from a regulator capable of supporting its RF current peaks. Configure pull-ups/pull-downs externally to keep CE low and RESET high even if the Android device is disconnected. Consult `HARDWARE.md` for the signal map.
+
+### Verification
+
+`bash scripts/check-protocol.sh` exercises packet framing, device scripts, mux restoration, MCP23017 read/modify/write, GPIO pin routing, safe-state sequencing, timeouts and GC9A01 framebuffer chunking. GitHub Actions also compiles, lints and signs the debug APK. These tests are simulated; actual hardware has not yet been bench-tested.

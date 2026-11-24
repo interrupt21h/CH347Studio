@@ -17,6 +17,8 @@ import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.WindowInsets;
@@ -38,6 +40,11 @@ import io.interrupt21h.ch347studio.devices.DeviceCatalog;
 import io.interrupt21h.ch347studio.devices.DeviceScripts;
 import io.interrupt21h.ch347studio.devices.EpaperFrames;
 import io.interrupt21h.ch347studio.devices.Gc9a01Frames;
+import io.interrupt21h.ch347studio.devices.Gc9a01Hardware;
+import io.interrupt21h.ch347studio.devices.GpioController;
+import io.interrupt21h.ch347studio.devices.GpioSequences;
+import io.interrupt21h.ch347studio.devices.Mcp23017Gpio;
+import io.interrupt21h.ch347studio.devices.PinAssignments;
 import io.interrupt21h.ch347studio.devices.MuxTools;
 import io.interrupt21h.ch347studio.ui.BusMatrixView;
 import io.interrupt21h.ch347studio.ui.EpaperPreviewView;
@@ -65,7 +72,7 @@ public final class MainActivity extends Activity {
     private static final String USB_PERMISSION = "io.interrupt21h.ch347studio.USB_PERMISSION";
     private static final int BG = 0xFF0B1120, SURFACE = 0xFF152239, MINT = 0xFF4FE3B5;
     private static final int WHITE = 0xFFEAF1FA, MUTED = 0xFF9AAFC8, BLUE = 0xFF293D58;
-    private static final String[] TABS = {"USB", "I²C BUS", "DISPLAYS", "RADIOS", "SENSORS", "SPI", "UART", "JTAG"};
+    private static final String[] TABS = {"USB", "I²C BUS", "DISPLAYS", "RADIOS", "SENSORS", "SPI", "GPIO", "UART", "JTAG"};
 
     private UsbManager usbManager;
     private UsbDevice selected;
@@ -84,6 +91,13 @@ public final class MainActivity extends Activity {
     private EditText selectedAddressField;
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private int spiMode = 0, spiClock = 6, spiCs = 0, spiHardwareAddress = 0;
+    private int gpioAddress = 0x20;
+    private volatile boolean gpioArmed;
+    private PinAssignments pinAssignments = new PinAssignments();
+    private final Handler gpioPollHandler = new Handler(Looper.getMainLooper());
+    private boolean gpioPolling;
+    private TextView gpioReadout;
+    private Runnable gpioPollTask;
     // Mux channel maps are kept separate from the upstream bus and from one another.
     private final Map<Integer,BusMap[]> muxMaps=new HashMap<>();
     private int activeMuxAddress=-1,activeMuxChannel=-1;
@@ -138,6 +152,12 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
+        gpioAddress = 0x20 + getPreferences(MODE_PRIVATE).getInt("gpio_address",0);
+        int[] mappings = new int[PinAssignments.Role.values().length];
+        for (PinAssignments.Role role:PinAssignments.Role.values())
+            mappings[role.ordinal()] = getPreferences(MODE_PRIVATE).getInt("gpio_pin_"+role.name(),role.ordinal());
+        try { pinAssignments = new PinAssignments(mappings); }
+        catch (IllegalArgumentException invalid) { log("Stored GPIO assignments invalid; using defaults"); }
         IntentFilter f = new IntentFilter();
         f.addAction(USB_PERMISSION);
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
@@ -159,6 +179,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         unregisterReceiver(usbReceiver);
+        stopGpioPolling();
         worker.shutdownNow();
         disconnect();
         super.onDestroy();
@@ -211,10 +232,13 @@ public final class MainActivity extends Activity {
     }
 
     private synchronized void closeBridge() {
+        gpioArmed = false;
         if (bridge != null) { bridge.close(); bridge = null; }
     }
 
     private void disconnect() {
+        gpioArmed = false;
+        stopGpioPolling();
         running = false;
         if (uart != null) { uart.close(); uart = null; }
         closeBridge();
@@ -245,13 +269,14 @@ public final class MainActivity extends Activity {
     }
 
     private void render() {
+        stopGpioPolling();
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(BG);
         root.setPadding(0, dp(12), 0, 0);
         setContentView(root);
         applySystemBarInsets(root);
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.VERTICAL); heading.setPadding(dp(20), dp(8), dp(20), dp(14));
-        TextView eyebrow = text("CH347  /  HARDWARE LAB  ·  v0.3.0", 10, MINT, true);
+        TextView eyebrow = text("CH347  /  HARDWARE LAB  ·  v0.4.0", 10, MINT, true);
         eyebrow.setLetterSpacing(0.16f); heading.addView(eyebrow);
         TextView title = text("CH347 Studio", 27, WHITE, true); title.setPadding(0, dp(4), 0, dp(6)); heading.addView(title);
         status = text("", 12, MUTED, false); heading.addView(status);
@@ -328,8 +353,9 @@ public final class MainActivity extends Activity {
             case 3: profilePanel("Radio"); break;
             case 4: profilePanel("Sensor"); break;
             case 5: spiPanel(); break;
-            case 6: uartPanel(); break;
-            case 7: jtagPanel(); break;
+            case 6: gpioPanel(); break;
+            case 7: uartPanel(); break;
+            case 8: jtagPanel(); break;
         }
         addLogs();
     }
@@ -348,6 +374,7 @@ public final class MainActivity extends Activity {
         action(c, bridge == null ? "Connect / Authorize USB" : "Reconnect", true, this::requestUsb);
         action(c, "Rescan USB devices", false, () -> { refreshDevices(); render(); });
         action(c, "Disconnect", false, () -> { disconnect(); render(); });
+        action(c, "Open GPIO expansion lab", false, () -> {currentTab=6;render();});
         LinearLayout modes = card();
         modes.addView(text("Mode selector (physical DIP switches)", 16, WHITE, true));
         detail(modes, "M0  ·  UART0 + UART1\nM1  ·  UART1 + I²C + SPI (bulk USB)\nM2  ·  UART1 + I²C + SPI (HID USB)\nM3  ·  UART1 + JTAG + I²C");
@@ -590,6 +617,10 @@ public final class MainActivity extends Activity {
 
     private void executeSpiScript(DeviceScripts.Script test) {
         Runnable go=()->runWork(test.title,()-> {
+            if (test.profile.equals("spi-nrf24") && gpioArmed) {
+                gpioSequences().radioCe(false);
+                log("nRF24 CE driven LOW before passive SPI diagnostics");
+            }
             String output=DeviceScripts.runSpi(test.id,
                   data -> requireBridge().spiTransfer(spiMode,spiClock,spiCs,data),spiHardwareAddress);
             log(test.title + " • " + output);
@@ -660,11 +691,35 @@ public final class MainActivity extends Activity {
             ClipboardManager cb=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
             cb.setPrimaryClip(ClipData.newPlainText("GC9A01 SPI wiring",Gc9a01Frames.wiring()));
         });
-        detail(gc,"A 240×240 RGB565 frame is 115,200 bytes. This local preview is functional; panel initialization and live pixel transfer are disabled until the required GPIO wiring/controller initialization are validated.");
+        detail(gc,"Experimental hardware path uses MCP23017 RESET/D-C/BLK and CH347 SPI in M1. It sends a standard DCS startup and a 115,200-byte RGB565 frame, but some GC9A01 modules need additional vendor initialization. Wiring must be verified.");
+        action(gc,"Send pattern to GC9A01 (experimental)",true,()->confirmHardware(
+                "Send image to physical GC9A01?",
+                "Confirm CH347 M1, SPI CS, 3.3 V logic, shared ground, and mapped TFT RESET/D/C. This resets the panel, sends initialization commands and writes an entire 240×240 frame; some modules may require different controller initialization.",
+                ()->runWork("GC9A01 hardware frame",()->{
+                    if(!gpioArmed)throw new IOException("Arm MCP23017 GPIO in the GPIO tab first");
+                    GpioSequences seq=gpioSequences();
+                    seq.pulseReset(PinAssignments.Role.TFT_RESET,20,120);
+                    Gc9a01Hardware lcd=new Gc9a01Hardware(data->requireBridge().spiTransfer(0,spiClock,spiCs,data),seq);
+                    lcd.basicWake();
+                    lcd.frame(Gc9a01Frames.make(gcPattern.getSelectedItemPosition()));
+                    log("GC9A01 pattern sent (no SPI readback is available for verification)");
+                })));
         LinearLayout epaper = card();
         epaper.addView(text("LAFVIN 2.13-inch e-paper HAT  ·  V4", 18, WHITE, true));
         detail(epaper, "122 × 250 mono pixels. SPI alone is insufficient: D/C, RESET and BUSY must also be controlled and observed. The CH347 cannot identify this write-only display through a JEDEC ID request.");
-        detail(epaper, "WIRING   3.3V / GND / MOSI(DIN) / SCLK / CS + separate D/C / RST / BUSY. Verify voltage on your exact breakout. Full refresh is disabled until GPIO control is implemented and validated.");
+        detail(epaper, "WIRING: 3.3 V, GND, DIN/MOSI, CLK, CS and MCP23017 D/C, RESET, BUSY. GPIO test and BUSY polling now work; framebuffer refresh remains disabled until the actual controller/revision and waveform timings are confirmed.");
+        action(epaper,"Read panel BUSY now",false,()->runWork("E-paper BUSY sample",()->{
+            if(!gpioArmed)throw new IOException("Arm MCP23017 first");
+            log("E-paper BUSY pin: "+(gpioSequences().epaperBusyHigh()?"HIGH":"LOW")+" (polarity depends on controller)");
+        }));
+        action(epaper,"Pulse e-paper reset (wiring test)",false,()->confirmHardware(
+                "Pulse e-paper RESET?",
+                "Verify the module RESET input, 3.3 V levels and controller reset timing. Some HAT revisions power-cycle with RESET; this only pulses RESET and does not refresh the panel.",
+                ()->runWork("E-paper reset pulse",()->{
+                    if(!gpioArmed)throw new IOException("Arm MCP23017 first");
+                    gpioSequences().pulseReset(PinAssignments.Role.EPAPER_RESET,10,100);
+                    log("E-paper RESET 10 ms LOW then 100 ms recovery");
+                })));
         Spinner patterns = spinner(epaper, new String[]{"Blank white", "Checkerboard", "Vertical bars", "Alignment / crosshair"}, 1);
         EpaperPreviewView preview = new EpaperPreviewView(this);
         epaper.addView(preview, new LinearLayout.LayoutParams(-1,-2));
@@ -680,6 +735,182 @@ public final class MainActivity extends Activity {
             ClipboardManager cb=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
             cb.setPrimaryClip(ClipData.newPlainText("e-paper SPI + GPIO control plan",plan));
         });
+    }
+
+    /** GPIO backends are bound to the UPSTREAM bus; pin state is always hardware readback. */
+    private Mcp23017Gpio gpioDevice() throws IOException {
+        requireBridge();
+        return new Mcp23017Gpio(rootTransport(),gpioAddress);
+    }
+    private GpioSequences gpioSequences() throws IOException {
+        return new GpioSequences(gpioDevice(),pinAssignments,Thread::sleep);
+    }
+    private void confirmHardware(String title,String detail,Runnable accepted) {
+        new AlertDialog.Builder(this).setTitle(title).setMessage(detail)
+            .setNegativeButton("Cancel",null).setPositiveButton("Proceed",(d,w)->accepted.run()).show();
+    }
+    private void stopGpioPolling() {
+        gpioPolling=false;
+        if(gpioPollTask!=null)gpioPollHandler.removeCallbacks(gpioPollTask);
+    }
+    private void startGpioPolling() {
+        stopGpioPolling();gpioPolling=true;
+        gpioPollTask=new Runnable(){@Override public void run(){
+            if(!gpioPolling || currentTab!=6)return;
+            if(!busy.get())loadGpioSnapshot(false);
+            gpioPollHandler.postDelayed(this,1500);
+        }};
+        gpioPollHandler.post(gpioPollTask);
+    }
+    private static String gpioStatus(GpioController.Snapshot s,PinAssignments pins) {
+        StringBuilder out=new StringBuilder();
+        for(int n=0;n<16;n++){
+            if(n==8)out.append("\n");
+            String role="";
+            for(PinAssignments.Role r:PinAssignments.Role.values())if(pins.get(r)==n){role="  "+r.label;break;}
+            out.append(PinAssignments.pinLabel(n)).append(" ")
+                .append(s.isInput(n)?"IN ":"OUT")
+                .append(s.isHigh(n)?" HIGH":" LOW ").append(role).append("\n");
+        }
+        return out.toString();
+    }
+    private void loadGpioSnapshot(boolean showErrors) {
+        runWork("GPIO readback",()->{
+            GpioController.Snapshot snapshot=gpioDevice().snapshot();
+            String readout=String.format(Locale.US,"MCP23017 0x%02X · %s\n",gpioAddress,gpioArmed?"ARMED":"READ ONLY")
+                +gpioStatus(snapshot,pinAssignments);
+            runOnUiThread(()->{if(gpioReadout!=null)gpioReadout.setText(readout);});
+        });
+    }
+    private void gpioPanel() {
+        blockTitle("GPIO expansion lab", "MCP23017 16-bit digital I/O · separate 3.3 V I²C controller for RESET, D/C, BUSY and nRF CE/IRQ.");
+        LinearLayout info=card();
+        info.addView(text("Safe configuration",17,WHITE,true));
+        detail(info,"CH347 MUST be in M1. Connect MCP23017 SDA/SCL, 3.3 V and common ground to the upstream I²C bus. Hold MCP23017 /RESET high. The GPIO driver requires the default IOCON BANK=0 register layout. Output changes are explicitly armed; the app does NOT reconfigure pins on startup.");
+        String[] addresses=new String[8];
+        for(int i=0;i<8;i++)addresses[i]=String.format(Locale.US,"0x%02X · MCP23017",0x20+i);
+        Spinner addr=spinner(info,addresses,Math.max(0,Math.min(7,gpioAddress-0x20)));
+        action(info,"Apply I²C address",false,()->{
+            if(gpioArmed){log("Disarm GPIO before changing address");return;}
+            gpioAddress=0x20+addr.getSelectedItemPosition();
+            getPreferences(MODE_PRIVATE).edit().putInt("gpio_address",gpioAddress-0x20).apply();
+            render();
+        });
+        LinearLayout mapping=card();
+        mapping.addView(text("Signal-to-pin routing",17,WHITE,true));
+        detail(mapping,"Assign each signal to a distinct pin. Disconnected signals cannot be driven. Wiring defaults: e-paper on GPA0–2, radio on GPA3–4, round TFT on GPA5–7. Save mappings before arming.");
+        String[] pins=new String[17];pins[0]="Not connected";
+        for(int i=0;i<16;i++)pins[i+1]=PinAssignments.pinLabel(i);
+        Spinner[] fields=new Spinner[PinAssignments.Role.values().length];
+        for(PinAssignments.Role role:PinAssignments.Role.values()){
+            detail(mapping,role.label+(role.output?"   ·   OUTPUT":"   ·   INPUT"));
+            fields[role.ordinal()]=spinner(mapping,pins,pinAssignments.get(role)+1);
+        }
+        action(mapping,"Save GPIO assignments",true,()->{
+            if(gpioArmed){log("Disarm GPIO before changing the pin map");return;}
+            int[] next=new int[fields.length];
+            for(int i=0;i<fields.length;i++)next[i]=fields[i].getSelectedItemPosition()-1;
+            try{
+                pinAssignments=new PinAssignments(next);
+                android.content.SharedPreferences.Editor edit=getPreferences(MODE_PRIVATE).edit();
+                for(PinAssignments.Role role:PinAssignments.Role.values())
+                    edit.putInt("gpio_pin_"+role.name(),pinAssignments.get(role));
+                edit.apply(); log("GPIO pin assignments saved");render();
+            }catch(IllegalArgumentException ex){
+                new AlertDialog.Builder(this).setTitle("Invalid pin map").setMessage(ex.getMessage())
+                    .setPositiveButton("OK",null).show();
+            }
+        });
+        LinearLayout control=card();
+        control.addView(text("Outputs and live readback",17,WHITE,true));
+        detail(control,"ARM sets mapped RESET pins HIGH, D/C and BLK LOW, CE LOW, and BUSY/IRQ inputs. Unrelated pins and registers are preserved. The app cannot guarantee safe states after USB power loss; add external pull resistors where needed.");
+        action(control,gpioArmed?"GPIO armed — reapply safe states":"ARM GPIO outputs (confirmation required)",true,()->confirmHardware(
+            "Arm MCP23017 outputs?", "Verify all 16 pin connections, voltage and target power. Initial RESET HIGH, CE LOW and TFT BLK LOW will be applied. GPIO outputs will change state.",
+            ()->runWork("Arm MCP23017",()->{
+                gpioSequences().arm();gpioArmed=true;
+                log(String.format(Locale.US,"MCP23017 at 0x%02X armed, %d mapped signals",gpioAddress,pinAssignments.values().length));
+                runOnUiThread(this::render);
+            })));
+        action(control,"Set radio CE LOW and TFT BLK OFF",false,()->runWork("Safe GPIO levels",()->{
+            if(!gpioArmed)throw new IOException("Arm GPIO first");
+            GpioSequences seq=gpioSequences();
+            if(pinAssignments.get(PinAssignments.Role.RADIO_CE)>=0)seq.radioCe(false);
+            if(pinAssignments.get(PinAssignments.Role.TFT_BACKLIGHT)>=0)seq.setBacklight(false);
+            log("Radio CE LOW, TFT BLK OFF (if mapped)");
+        }));
+        action(control,"Disarm — return mapped outputs to input",false,()->confirmHardware(
+            "Disarm GPIO lines?", "CE and BLK will be driven LOW first. Configured output lines will become high impedance. External pull resistors may be required to hold RESET and other inputs at safe levels.",
+            ()->runWork("Disarm MCP23017",()->{
+                if(!gpioArmed)return;
+                Mcp23017Gpio dev=gpioDevice();
+                GpioSequences seq=gpioSequences();
+                if(pinAssignments.get(PinAssignments.Role.RADIO_CE)>=0)seq.radioCe(false);
+                if(pinAssignments.get(PinAssignments.Role.TFT_BACKLIGHT)>=0)seq.setBacklight(false);
+                for(PinAssignments.Role role:PinAssignments.Role.values())
+                    if(role.output&&pinAssignments.get(role)>=0)dev.input(pinAssignments.get(role));
+                gpioArmed=false;
+                runOnUiThread(this::render);
+            })));
+        gpioReadout=text("Press Read GPIO to inspect hardware direction and logic levels.",12,MUTED,false);
+        gpioReadout.setTypeface(Typeface.MONOSPACE);control.addView(gpioReadout);
+        action(control,"Read GPIO state",true,()->loadGpioSnapshot(true));
+        action(control,"Start / stop 1.5-second live polling",false,()->{
+            if(gpioPolling){stopGpioPolling();log("GPIO polling stopped");}
+            else {startGpioPolling();log("GPIO polling enabled; stops on tab change");}
+        });
+        LinearLayout manual=card();
+        manual.addView(text("Manual GPIO test bench",17,WHITE,true));
+        detail(manual,"Select any pin, then choose input, output HIGH or output LOW. Outputs require explicit arming and confirmation; manual changes can override reserved signals. Input mode is high-impedance (no pull-up automatically enabled).");
+        Spinner chosen=spinner(manual,java.util.Arrays.copyOfRange(pins,1,pins.length),0);
+        action(manual,"Test selected GPIO pin",false,()->{
+            int p=chosen.getSelectedItemPosition();
+            String pinName=PinAssignments.pinLabel(p);
+            String[] options={"Read level (safe)","Configure as input (high impedance)","Output LOW", "Output HIGH"};
+            new AlertDialog.Builder(this).setTitle(pinName+" test")
+               .setItems(options,(dialog,which)->{
+                   if(which>0&&!gpioArmed){log("Arm GPIO before changing pin direction/level");return;}
+                   Runnable execute=()->runWork(pinName+" GPIO action",()->{
+                       Mcp23017Gpio gpio=gpioDevice();
+                       if(which==0)log(pinName+" level "+(gpio.read(p)?"HIGH":"LOW"));
+                       else if(which==1)gpio.input(p);
+                       else gpio.output(p,which==3);
+                       GpioController.Snapshot snap=gpio.snapshot();
+                       runOnUiThread(()->{if(gpioReadout!=null)gpioReadout.setText(gpioStatus(snap,pinAssignments));});
+                   });
+                   if(which>0)confirmHardware("Change "+pinName+"?",
+                       "This may override a mapped control signal and change target hardware. Verify wiring, voltage and current limits.",execute);
+                   else execute.run();
+               }).setNegativeButton("Cancel",null).show();
+        });
+        LinearLayout scripts=card();
+        scripts.addView(text("Device control sequences",17,WHITE,true));
+        action(scripts,"GC9A01 reset 20 ms + recovery",false,()->confirmHardware("Reset physical round TFT?",
+            "Only proceed if TFT RESET is mapped and connected.",()->runWork("TFT RESET pulse",()->{
+                if(!gpioArmed)throw new IOException("Arm GPIO first");
+                gpioSequences().pulseReset(PinAssignments.Role.TFT_RESET,20,120);
+                log("GC9A01 reset pulse complete");
+            })));
+        action(scripts,"GC9A01 backlight ON / OFF",false,()->new AlertDialog.Builder(this)
+            .setTitle("Backlight GPIO").setItems(new String[]{"ON","OFF"},(d,which)->runWork("Backlight control",()->{
+                if(!gpioArmed)throw new IOException("Arm GPIO first");
+                gpioSequences().setBacklight(which==0);
+                log("GC9A01 BLK "+(which==0?"ON":"OFF"));
+            })).show());
+        action(scripts,"nRF24 CE LOW and IRQ read",false,()->runWork("nRF24 GPIO status",()->{
+            if(!gpioArmed)throw new IOException("Arm GPIO first");
+            GpioSequences seq=gpioSequences();seq.radioCe(false);
+            log("nRF24 CE LOW; IRQ="+(seq.radioIrqHigh()?"HIGH":"LOW"));
+        }));
+        action(scripts,"nRF24 CE timed pulse (RF possible!)",false,()->confirmHardware(
+            "Allow possible RF activity?",
+            "The CE line may activate transmit/receive depending on current nRF24 registers and FIFO. Only run in a permitted RF environment with a stable 3.3 V supply. This sends NO SPI payload, but the radio may already be configured.",
+            ()->runWork("nRF24 CE pulse",()->{
+                if(!gpioArmed)throw new IOException("Arm GPIO first");
+                GpioSequences seq=gpioSequences();seq.radioCe(true);
+                try{Thread.sleep(15);}finally{seq.radioCe(false);}
+                log("CE HIGH 15 ms, returned LOW");
+            })));
+        detail(scripts,"Panel-specific e-paper full refresh is intentionally unavailable pending controller ID and waveform selection. E-paper RESET and BUSY checks are under SPI. No autonomous nRF24 transmitter test is run.");
     }
 
     private void uartPanel() {
